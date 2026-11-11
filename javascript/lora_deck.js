@@ -72,6 +72,8 @@
         star: '<path d="M12 3.6l2.6 5.3 5.8.85-4.2 4.1 1 5.8L12 16.9l-5.2 2.75 1-5.8-4.2-4.1 5.8-.85z"/>',
         info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6h.01"/>',
         refresh: '<path d="M20 11.5A8 8 0 0 0 5.6 6.4L4 8"/><path d="M4 3.8V8h4.2"/><path d="M4 12.5a8 8 0 0 0 14.4 5.1L20 16"/><path d="M20 20.2V16h-4.2"/>',
+        rotr: '<path d="M20 12a8 8 0 1 1-2.35-5.65L20 8.7"/><path d="M20 4v4.7h-4.7"/>',
+        rotl: '<path d="M4 12a8 8 0 1 0 2.35-5.65L4 8.7"/><path d="M4 4v4.7h4.7"/>',
         eye: '<path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>',
         eyeOff: '<path d="M3 3l18 18"/><path d="M10.4 5.6A9.5 9.5 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.6 3.4M6.5 6.6C4 8.2 2.5 12 2.5 12S6 18.5 12 18.5a9 9 0 0 0 4.4-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
         sort: '<path d="M11 6h9M11 12h6.5M11 18h4"/><path d="M4.5 15.5 7 18l2.5-2.5M7 6v12"/>',
@@ -1461,15 +1463,28 @@
         };
     }
     // --- the picture in its card -----------------------------------------------------------------------------------
-    // A framing is {x, y, z}: the point of the picture (as a share of its width and height) at the card's centre, and
-    // the zoom (1: the picture just covers the card; less shows more of it over a blurred copy, more zooms in). Without
-    // one saved, a picture of about the card's shape fills it, and any other shows whole, so square or wide previews
-    // aren't trimmed.
+    // A framing is {x, y, z, r}: the point of the picture (as a share of its width and height) at the card's centre,
+    // the zoom (1: the picture just covers the card; less shows more of it over a blurred copy, more zooms in), and
+    // how far it's turned (degrees clockwise; none when upright). A turned picture is placed by the box around it, so x
+    // and y are shares of that box. Without one saved, a picture of about the card's shape fills it, and any other
+    // shows whole, so square or wide previews aren't trimmed.
     const CARD_RATIO = 2 / 3;
     const tierFor = (px) => WIDTHS.find((x) => x >= px) || WIDTHS[WIDTHS.length - 1];
-    const ratioOf = (it) => (it.pw && it.ph ? it.pw / it.ph : CARD_RATIO);
-    function wholeZoom(it) {
-        const k = ratioOf(it) / CARD_RATIO;
+    // the box around the picture turned by r degrees, in the picture's own pixels (pw, ph: the picture itself)
+    function turnedSize(it, r) {
+        const pw = it.pw && it.ph ? it.pw : CARD_RATIO, ph = it.pw && it.ph ? it.ph : 1;
+        if (!r) return { w: pw, h: ph, pw, ph };
+        const a = (r * Math.PI) / 180, c = Math.abs(Math.cos(a)), s = Math.abs(Math.sin(a));
+        return { w: pw * c + ph * s, h: pw * s + ph * c, pw, ph };
+    }
+    const ratioOf = (it, r) => {
+        const t = turnedSize(it, r);
+        return t.w / t.h;
+    };
+    const turnOf = (it) => (it.framing && it.framing.r) || 0;
+    const normAngle = (r) => Math.round((((((r % 360) + 540) % 360) - 180)) * 10) / 10 || 0;
+    function wholeZoom(it, r) {
+        const k = ratioOf(it, r) / CARD_RATIO;
         return k > 1 ? 1 / k : k;
     }
     function framingOf(it) {
@@ -1479,25 +1494,39 @@
         return { x: 0.5, y: 0.5, z: wholeZoom(it), auto: true };
     }
     // where the picture goes, in % of the card's picture box; kept from leaving it (raw: as given)
+    // (a turned picture: the box around it; p.img is the picture itself, centred in that box, before it's turned)
     function placePic(it, fr, raw) {
-        const k = ratioOf(it) / CARD_RATIO;
+        const r = fr.r || 0;
+        const t = turnedSize(it, r);
+        const k = t.w / t.h / CARD_RATIO;
         const w = (k > 1 ? k * 100 : 100) * fr.z, h = (k > 1 ? 100 : 100 / k) * fr.z;
         let left = 50 - fr.x * w, top = 50 - fr.y * h;
         if (!raw) {
             left = w >= 100 ? clamp(left, 100 - w, 0) : clamp(left, 0, 100 - w);
             top = h >= 100 ? clamp(top, 100 - h, 0) : clamp(top, 0, 100 - h);
         }
-        return { left, top, w, h, gaps: w < 99.5 || h < 99.5 };
+        const p = { left, top, w, h, r, gaps: w < 99.5 || h < 99.5 || r % 90 !== 0 };
+        if (r) {
+            // its width in % of the card's width, its height in % of the card's height (the card is 2:3)
+            const iw = (w * t.pw) / t.w, ih = ((w * t.ph) / t.w) * CARD_RATIO;
+            p.img = { left: left + w / 2 - iw / 2, top: top + h / 2 - ih / 2, w: iw, h: ih };
+        }
+        return p;
     }
     function clampFraming(it, fr) {
         const p = placePic(it, fr);
         const out = { x: (50 - p.left) / p.w, y: (50 - p.top) / p.h, z: fr.z };
+        if (fr.r) out.r = fr.r;
         if (fr.auto) out.auto = true;  // still the automatic one (saved as none, so it follows the picture)
         return out;
     }
-    const picStyle = (p) => `left:${p.left.toFixed(3)}%;top:${p.top.toFixed(3)}%;width:${p.w.toFixed(3)}%;height:${p.h.toFixed(3)}%`;
+    function picStyle(p) {
+        const b = p.img || p;
+        return `left:${b.left.toFixed(3)}%;top:${b.top.toFixed(3)}%;width:${b.w.toFixed(3)}%;height:${b.h.toFixed(3)}%${p.r ? `;rotate:${p.r}deg` : ""}`;
+    }
     // a zoomed-in or wide picture needs more pixels than the card is wide
-    const picTier = (it, w) => tierFor(w * Math.max(1, placePic(it, framingOf(it)).w / 100));
+    const picWide = (p) => Math.max(1, (p.img || p).w / 100);
+    const picTier = (it, w) => tierFor(w * picWide(placePic(it, framingOf(it))));
 
     function cardFor(d, it, w) {
         let c = d.cards.get(it.name);
@@ -1938,7 +1967,7 @@
     // a LoRA's card as the deck shows it, for the editor and the small card: [shape wrapper > card]
     function cardView(it, fr, shape, size, cssSize) {
         const p = placePic(it, fr);
-        const src = thumbUrl(it, tierFor(size * 1.6 * Math.max(1, p.w / 100)));
+        const src = thumbUrl(it, tierFor(size * 1.6 * picWide(p)));
         const pic = !it.preview ? `<div class="ld-nopic"><span>${esc(it._title.slice(0, 2))}</span></div>`
             : isVideo(it) ? `<video class="ld-pic" src="${thumbUrl(it, 480)}" muted loop playsinline autoplay></video>`
                 : `<img class="ld-pic-bg" src="${src}" alt="" aria-hidden="true"${p.gaps ? "" : " hidden"}><img class="ld-pic ld-framed" src="${src}" alt="" draggable="false" style="${picStyle(p)}">`;
@@ -1955,6 +1984,14 @@
         const reveal = `<button type="button" class="ld-btn ld-reveal" data-do="reveal" title="Show this preview">${ic("eye")}<span>Show</span></button>`;
         if (isVideo(it)) return `<video class="ld-m-pic" src="${thumbUrl(it, big)}" muted loop playsinline autoplay></video>${reveal}`;
         if (!it.preview) return `<div class="ld-nopic"><span>${esc(it._title.slice(0, 2))}</span></div>`;
+        const r = turnOf(it);
+        if (r) {
+            // turned as in its card: the box around the turned picture fits the space (BW: that box's width)
+            const t = turnedSize(it, r);
+            const bw = `min(100cqw, ${((100 * t.w) / t.h).toFixed(3)}cqh)`;
+            return `<img class="ld-m-bg" src="${thumbUrl(it, 240)}" alt="" aria-hidden="true" style="rotate:${r}deg">`
+                + `<div class="ld-m-turn"><img class="ld-m-pic" src="${thumbUrl(it, big)}" alt="" style="width:calc(${bw} * ${(t.pw / t.w).toFixed(5)});height:calc(${bw} * ${(t.ph / t.w).toFixed(5)});rotate:${r}deg"></div>${reveal}`;
+        }
         return `<img class="ld-m-bg" src="${thumbUrl(it, 240)}" alt="" aria-hidden="true"><img class="ld-m-pic" src="${thumbUrl(it, big)}" alt="">${reveal}`;
     }
     function renderMedia(st) {
@@ -1968,7 +2005,7 @@
                 <div class="ld-stage-shapes" role="radiogroup" aria-label="See it in another card shape">
                   ${["hex", "octa", "card"].map((s) => `<button type="button" class="ld-btn ld-icon${s === st.shape ? " on" : ""}" data-shape="${s}" role="radio" aria-checked="${s === st.shape}" title="${s === "hex" ? "Hexagon" : s === "octa" ? "Octagon" : "Rounded"}${s === prefs.shape ? " (your cards)" : ""}">${ic(s === "card" ? "rect" : s)}</button>`).join("")}
                 </div>
-                ${still ? `<div class="ld-stage-hint">${ic("move")}Drag to move · wheel to zoom</div>` : ""}
+                ${still ? `<div class="ld-stage-hint">${ic("move")}Drag to move · wheel to zoom · Shift+wheel to rotate</div>` : ""}
                 ${fit(st).preview ? `<button type="button" class="ld-btn ld-reveal" data-do="reveal" title="Show this preview">${ic("eye")}<span>Show</span></button>` : ""}
               </div>`;
             paintStage(st);
@@ -1989,9 +2026,11 @@
         const ghost = stage.querySelector(".ld-stage-ghost");
         if (media && ghost) {
             const x0 = card.offsetLeft + media.offsetLeft, y0 = card.offsetTop + media.offsetTop;
+            const b = p.img || p;
             Object.assign(ghost.style, {
-                left: (x0 + (p.left / 100) * media.offsetWidth) + "px", top: (y0 + (p.top / 100) * media.offsetHeight) + "px",
-                width: (p.w / 100) * media.offsetWidth + "px", height: (p.h / 100) * media.offsetHeight + "px",
+                left: (x0 + (b.left / 100) * media.offsetWidth) + "px", top: (y0 + (b.top / 100) * media.offsetHeight) + "px",
+                width: (b.w / 100) * media.offsetWidth + "px", height: (b.h / 100) * media.offsetHeight + "px",
+                rotate: p.r ? `${p.r}deg` : "",
             });
         }
         const panel = st.wrap.querySelector('[data-panel="frame"]');
@@ -2000,7 +2039,37 @@
             if (z && document.activeElement !== z) z.value = zoomToSlider(st.fr.z);
             const out = panel.querySelector(".ld-zoom-val");
             if (out) out.textContent = Math.round(st.fr.z * 100) + "%";
+            const r = st.fr.r || 0;
+            const tr = panel.querySelector(".ld-turn");
+            if (tr && document.activeElement !== tr) tr.value = String(fineTurn(r));
+            const rv = panel.querySelector(".ld-turn-val");
+            if (rv) rv.textContent = r ? `${r > 0 ? "" : "−"}${Math.abs(r)}°` : "upright";
         }
+    }
+    // turning: by quarter turns, plus a small straightening turn (−45° to 45°) on top
+    const fineTurn = (r) => Math.round((r - 90 * Math.round(r / 90)) * 10) / 10 || 0;
+    // the picture's size on screen (card widths per picture pixel) for a turn and zoom
+    function picScale(it, r, z) {
+        const t = turnedSize(it, r);
+        const k = t.w / t.h / CARD_RATIO;
+        return k > 1 ? z / CARD_RATIO / t.h : z / t.w;
+    }
+    // turn it to r degrees around the point at the card's centre. Quarter turns keep the zoom (so a picture that filled
+    // the card still does); small turns keep its size on screen, so straightening it doesn't make it jump.
+    function turnTo(st, r, keepSize) {
+        const it = fit(st), fr = st.fr, r0 = fr.r || 0;
+        r = normAngle(r);
+        const a = turnedSize(it, r0), b = turnedSize(it, r);
+        // the centre point, from the middle of the picture, in its pixels as it shows; turned back, then the new way
+        const dx = (fr.x - 0.5) * a.w, dy = (fr.y - 0.5) * a.h;
+        const t0 = (-r0 * Math.PI) / 180, t1 = (r * Math.PI) / 180;
+        const ux = dx * Math.cos(t0) - dy * Math.sin(t0), uy = dx * Math.sin(t0) + dy * Math.cos(t0);
+        const nx = ux * Math.cos(t1) - uy * Math.sin(t1), ny = ux * Math.sin(t1) + uy * Math.cos(t1);
+        const z = keepSize ? (fr.z * picScale(it, r0, 1)) / picScale(it, r, 1) : fr.z;
+        const next = { x: 0.5 + nx / b.w, y: 0.5 + ny / b.h, z: clamp(z, ZMIN, ZMAX) };
+        if (r) next.r = r;
+        st.fr = clampFraming(it, next);
+        paintStage(st);
     }
     const ZMIN = 0.2, ZMAX = 5;
     const zoomToSlider = (z) => Math.round((Math.log(z / ZMIN) / Math.log(ZMAX / ZMIN)) * 1000);
@@ -2012,7 +2081,7 @@
         const nz = clamp(z, ZMIN, ZMAX);
         const k = nz / st.fr.z;
         const nw = p.w * k, nh = p.h * k;
-        st.fr = { x: (50 - (cx - ux * nw)) / nw, y: (50 - (cy - uy * nh)) / nh, z: nz };
+        st.fr = { x: (50 - (cx - ux * nw)) / nw, y: (50 - (cy - uy * nh)) / nh, z: nz, r: st.fr.r };
         st.fr = clampFraming(fit(st), st.fr);
         paintStage(st);
     }
@@ -2032,7 +2101,7 @@
             if (!drag) return;
             const p = placePic(fit(st), drag.fr, true);
             const dl = ((e.clientX - drag.x) / drag.w) * 100, dt = ((e.clientY - drag.y) / drag.h) * 100;
-            st.fr = clampFraming(fit(st), { x: drag.fr.x - dl / p.w, y: drag.fr.y - dt / p.h, z: drag.fr.z });
+            st.fr = clampFraming(fit(st), { x: drag.fr.x - dl / p.w, y: drag.fr.y - dt / p.h, z: drag.fr.z, r: drag.fr.r });
             paintStage(st);
         });
         const end = () => {
@@ -2046,6 +2115,8 @@
             const media = m.querySelector(".ld-stage-card .ld-media");
             if (!media) return;
             e.preventDefault();
+            // Shift+wheel turns it, a degree a notch (the browser may send Shift+wheel as a sideways scroll)
+            if (e.shiftKey) return turnTo(st, (st.fr.r || 0) + Math.sign(e.deltaY || e.deltaX), true);
             const r = media.getBoundingClientRect();
             zoomAt(st, st.fr.z * Math.exp(-e.deltaY * 0.0015), ((e.clientX - r.left) / r.width) * 100, ((e.clientY - r.top) / r.height) * 100);
         }, { passive: false });
@@ -2067,7 +2138,7 @@
         const pic = st.mode === "info" ? s.pic : 0;
         modal.style.gridTemplateColumns = pic ? `${pic}px minmax(0, 1fr)` : "";
         // a bigger picture asks for a taller dialog too (as tall as the picture's shape wants, up to the window)
-        st.media.style.minHeight = pic ? `min(${Math.round(pic / ratioOf(st.it))}px, calc(100vh - 48px))` : "";
+        st.media.style.minHeight = pic ? `min(${Math.round(pic / ratioOf(st.it, turnOf(st.it)))}px, calc(100vh - 48px))` : "";
     }
     // which edge or corner of the dialog the mouse is on ("l", "br"...), within a few pixels outside it
     function zoneAt(st, x, y) {
@@ -2272,8 +2343,8 @@
         panel.innerHTML = `
           <div class="ld-m-scroll">
             ${still ? `<section><h4>${ic("image")}Preview <small class="ld-frame-note">${esc(frameNote(st))}</small></h4>
-              <p class="ld-hint">Drag the picture to move it, and use the mouse wheel or the slider to zoom. The faint part
-              around the card is what the card doesn't show. The shape buttons above it only preview: your cards keep their shape.</p></section>
+              <p class="ld-hint">Drag the picture to move it, and use the mouse wheel or the slider to zoom (Shift+wheel turns it).
+              The faint part around the card is what the card doesn't show. The shape buttons above it only preview: your cards keep their shape.</p></section>
             <section><h4>${ic("gridLarge")}Zoom <small class="ld-zoom-val"></small></h4>
               <div class="ld-zoomrow"><button type="button" class="ld-btn ld-icon" data-do="zout" title="Zoom out" aria-label="Zoom out">${ic("minus")}</button>
                 <input type="range" class="ld-zoom" min="0" max="1000" step="1" aria-label="Zoom">
@@ -2282,6 +2353,13 @@
                 <button type="button" class="ld-chip" data-do="fill" title="The picture covers the whole card">Fill the card</button>
                 <button type="button" class="ld-chip" data-do="whole" title="All of the picture shows, with a soft blur around it">Whole picture</button>
                 <button type="button" class="ld-chip" data-do="reset" title="How LoRA Deck places it by itself: pictures of the card's shape fill it, others show whole">Automatic</button>
+              </div></section>
+            <section><h4>${ic("rotr")}Rotate <small class="ld-turn-val"></small></h4>
+              <div class="ld-zoomrow"><button type="button" class="ld-btn ld-icon" data-do="turnl" title="Turn it a quarter to the left" aria-label="Turn it a quarter to the left">${ic("rotl")}</button>
+                <input type="range" class="ld-turn" min="-45" max="45" step="0.5" aria-label="Straighten" title="Straighten: a small turn either way (double-click: none)">
+                <button type="button" class="ld-btn ld-icon" data-do="turnr" title="Turn it a quarter to the right" aria-label="Turn it a quarter to the right">${ic("rotr")}</button></div>
+              <div class="ld-chips">
+                <button type="button" class="ld-chip" data-do="upright" title="Not turned at all">Upright</button>
               </div></section>`
             : `<section><h4>${ic("image")}Preview</h4><p class="ld-hint">${it.preview ? "Its preview is a video, which always shows whole in its card. Pick one of its gens or upload a picture to take its place."
                 : "This LoRA has no preview yet. Pick one of its gens or upload a picture, then move and zoom it here."}</p></section>`}
@@ -2295,6 +2373,11 @@
             ${still ? `<button type="button" class="ld-btn ld-pill ld-main ld-primary" data-do="saveframe">${ic("check")}<span>Save preview</span></button>` : ""}</div>`;
         const zoom = panel.querySelector(".ld-zoom");
         if (zoom) zoom.addEventListener("input", (e) => zoomAt(st, sliderToZoom(Number(e.target.value)), 50, 50));
+        const turn = panel.querySelector(".ld-turn");
+        if (turn) {
+            turn.addEventListener("input", (e) => turnTo(st, 90 * Math.round((st.fr.r || 0) / 90) + Number(e.target.value), true));
+            turn.addEventListener("dblclick", () => turnTo(st, 90 * Math.round((st.fr.r || 0) / 90), true));
+        }
         panel.querySelector(".ld-file").addEventListener("change", (e) => {
             const f = e.target.files && e.target.files[0];
             e.target.value = "";
@@ -2829,11 +2912,16 @@
         else if (what === "explore") api("reveal", { name: it.name }).then(() => toast(`Shown in ${REVEAL_IN}`), (err) => toast(`Couldn't open it: ${err.message}`));
         else if (what === "wminus" || what === "wplus") setWeight(tab, it, now() + (what === "wplus" ? 0.05 : -0.05) * (e.shiftKey ? 4 : 1));
         else if (what === "zin" || what === "zout") zoomAt(st, st.fr.z * (what === "zin" ? 1.15 : 1 / 1.15), 50, 50);
+        else if (what === "turnl" || what === "turnr") {
+            // a quarter turn from the nearest quarter, keeping any small straightening turn
+            const r = st.fr.r || 0;
+            turnTo(st, r + (what === "turnr" ? 90 : -90));
+        } else if (what === "upright") turnTo(st, 0, Math.abs(fineTurn(st.fr.r || 0)) === Math.abs(st.fr.r || 0));
         else if (what === "fill") {
-            st.fr = clampFraming(fit(st), { x: st.fr.x, y: st.fr.y, z: 1 });
+            st.fr = clampFraming(fit(st), { x: st.fr.x, y: st.fr.y, z: 1, r: st.fr.r });
             paintStage(st);
         } else if (what === "whole") {
-            st.fr = clampFraming(fit(st), { x: 0.5, y: 0.5, z: wholeZoom(fit(st)) });
+            st.fr = clampFraming(fit(st), { x: 0.5, y: 0.5, z: wholeZoom(fit(st), st.fr.r), r: st.fr.r });
             paintStage(st);
         } else if (what === "reset") {
             st.fr = clampFraming(fit(st), { ...framingOf({ ...fit(st), framing: null }) });
@@ -2847,7 +2935,7 @@
         }
         else if (what === "saveframe") {
             // a picture picked here (or the first gen it shows) becomes its preview, with this framing; else just the framing
-            const fr = st.fr.auto ? null : { x: st.fr.x, y: st.fr.y, z: st.fr.z };
+            const fr = st.fr.auto ? null : { x: st.fr.x, y: st.fr.y, z: st.fr.z, ...(st.fr.r ? { r: st.fr.r } : {}) };
             const pick = st.pick || (it.preview === "gen" ? { kind: "gen", id: it.gen.id } : null);
             const hadOne = !!it.preview && it.preview !== "gen";
             b.disabled = true;

@@ -8,8 +8,8 @@ A new **Lora** tab for Stable Diffusion WebUI: a fast, good-looking LoRA browser
   chips below.
 - **Clicking a card** adds the LoRA. If its activation text has alternatives (outfits, poses...), it asks which one.
 - **A card already in the prompt** is lit and shows its weight, which you can change in place.
-- **Previews that fit:** square and wide pictures show whole instead of being cut off, and you can move and zoom each
-  one in its card. A LoRA without a preview can show the first picture you made with it.
+- **Previews that fit:** square and wide pictures show whole instead of being cut off, and you can move, zoom and
+  rotate each one in its card. A LoRA without a preview can show the first picture you made with it.
 - **Edit in place:** the preview (one of your gens, or an upload), the card's texts, and a look at the file's metadata.
 - **Fast:** previews are served as small thumbnails, and only the rows of cards near the view are on the page, so
   hundreds of LoRAs scroll smoothly. Cards that arrive during a fast scroll fade in.
@@ -113,6 +113,9 @@ beside it keeps its width. Double-click a grip to go back to the usual size.
 - **Edit preview** shows the picture in a card of your shape, with the rest of the picture faintly around it.
   - Drag to move it; the mouse wheel or the slider zooms. **Fill the card**, **Whole picture** and **Automatic** are
     quick choices.
+  - **Rotate:** the two buttons turn it a quarter left or right, and the slider (or Shift + mouse wheel, a degree a
+    notch) straightens it by up to 45° either way. **Upright** undoes the turn. The details and every card show it
+    turned too; the picture file itself isn't changed.
   - The three shape buttons above the card preview the other shapes. They don't change your cards' shape.
   - **Picture:** pick one of the pictures you made with this LoRA (newest first), **Upload** one, or take the one
     shown in the WebUI's **Gallery** (like the WebUI editor's Replace preview). It shows in the card straight away, to

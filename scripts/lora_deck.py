@@ -12,7 +12,7 @@ The page itself is javascript/lora_deck.js and style.css; this file gives it wha
   GET /lora-deck/v1/card?name=       its card as written (for the card editor)
   POST /lora-deck/v1/card            save its card (description, activation and negative text, weight, notes, version);
                                      every other key in the .json is kept
-  POST /lora-deck/v1/framing         save how its preview sits in a card (position and zoom), or forget it
+  POST /lora-deck/v1/framing         save how its preview sits in a card (position, zoom and turn), or forget it
   POST /lora-deck/v1/preview         a new preview (an uploaded picture or one of its gens), with its framing; the old
                                      one is moved to cache/preview-backups first
   GET /lora-deck/v1/gens?name=       the pictures made with it in the WebUI's output folders (as its settings name
@@ -54,7 +54,7 @@ EXT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 THUMBS = os.path.join(EXT_DIR, "cache", "thumbs")
 BACKUPS = os.path.join(EXT_DIR, "cache", "preview-backups")
 CARD_KEYS = ("description", "activation text", "negative text", "preferred weight", "notes", "sd version")
-OWN_KEY = "lora deck"  # LoRA Deck's own entry in a card: {"framing": {"x": .5, "y": .4, "z": 1}}
+OWN_KEY = "lora deck"  # LoRA Deck's own entry in a card: {"framing": {"x": .5, "y": .4, "z": 1, "r": 90}} (r: if turned)
 # The order the WebUI's Lora tab looks for a preview in: <name>.<ext>, then <name>.preview.<ext>, for each kind.
 STILL = ("png", "jpg", "jpeg", "webp", "avif", "jxl", "heif")
 MOVING = ("gif", "mp4", "webm")
@@ -243,9 +243,21 @@ def _framing(user):
     if not isinstance(fr, dict):
         return None
     try:
-        return {"x": float(fr["x"]), "y": float(fr["y"]), "z": float(fr["z"])}
+        out = {"x": float(fr["x"]), "y": float(fr["y"]), "z": float(fr["z"])}
+        r = _angle(fr.get("r", 0))
     except (KeyError, TypeError, ValueError):
         return None
+    if r:
+        out["r"] = r
+    return out
+
+
+def _angle(r):
+    """A turn in degrees, clockwise, as -180 up to 180 (0: upright)."""
+    r = float(r)
+    if r != r or r in (float("inf"), float("-inf")):
+        raise ValueError("not a number")
+    return round((r + 180) % 360 - 180, 1) + 0.0
 
 
 def _write_card(obj, change):
@@ -527,9 +539,12 @@ def _clean_framing(given):
         return None
     try:
         fr = {k: round(float(given[k]), 4) for k in ("x", "y", "z")}
-    except (KeyError, TypeError, ValueError):
-        raise HTTPException(400, "The framing needs x, y and z numbers.")
+        r = _angle(given.get("r", 0))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise HTTPException(400, "The framing needs x, y and z numbers (and r, a turn in degrees, if it's turned).")
     fr["z"] = min(8.0, max(0.1, fr["z"]))
+    if r:
+        fr["r"] = r
     return fr
 
 

@@ -418,6 +418,10 @@
 .ld-m-media > .ld-m-pic { object-fit: contain; }
 .ld-m-media > .ld-m-bg { inset: -10%; width: 120%; height: 120%; object-fit: cover; filter: blur(22px) saturate(1.2) brightness(.6); }
 .ld-m-media .ld-nopic { position: absolute; inset: 0; }
+/* a turned preview in the details: its box fits the space (the picture's size is worked out in container units) */
+.ld-m-media > .ld-m-turn { position: absolute; inset: 0; container-type: size; display: grid; place-items: center; overflow: hidden; }
+.ld-m-turn > .ld-m-pic { display: block; max-width: none; object-fit: fill; }
+.ld-modal-wrap.show .ld-modal[data-mode="info"] .ld-m-turn > .ld-m-pic { animation: ld-settle .5s var(--ld-ease) both; }
 .ld-reveal { position: absolute; left: 50%; bottom: 16px; translate: -50% 0; display: none; align-items: center; gap: 6px; height: 32px; padding: 0 14px;
     border-radius: 999px; color: #fff; font-size: 13px; font-weight: 700; background: rgba(8, 10, 18, .65); border: 1px solid rgba(255, 255, 255, .2);
     -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
