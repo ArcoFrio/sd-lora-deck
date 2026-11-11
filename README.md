@@ -167,6 +167,14 @@ Off by default. When it's on, a click lays the prompt out one line per kind of t
   - by where a body part is: `arms up` is a pose, `hair up` appearance and `breasts out` body.
   - It knows Danbooru's and e621's tags: it places about 98% of the tag uses in Danbooru's 5,000 most-used tags, and
     about 94% for e621.
+  - **A table of known tags** fills in what the rules can't: about 8,300 Danbooru tags (whole outfits, cosplay,
+    combat, handheld objects, food...), from the [Danbooru Tag Taxonomy](https://huggingface.co/datasets/Mexes/danbooru-tag-taxonomy).
+    With it, 96% of the uses of its 28,000 sorted tags land on the right line and none is left unplaced. It loads the
+    first time Organize tags is on (about 110 KB).
+  - **New tags** that neither knows are placed by their last word, when that word picks one line in at least 85% of
+    the sorted tags ending in it. Held out from learning, those guesses were right 95% of the time.
+  - Where the taxonomy and this layout disagree on purpose, the layout wins: where someone looks (`looking at viewer`)
+    stays a pose, `full body` and `upper body` stay on the camera line, `solo focus` with who is in it.
 - **A LoRA's own trigger words** (tags that aren't real booru tags) on its card's first line stay on line 2. On later
   lines, a tag it can't place goes with the rest of its line: an outfit trigger like `alicedress` goes with the outfit.
   LoRA Deck tells trigger words from real tags with the tag lists of
@@ -208,10 +216,19 @@ are shared: `paper hat, red || blue || green` always adds `paper hat`, then the 
     a LoRA and its own files to the Recycle Bin.
 - `javascript/lora_deck.js`: the tab.
 - `javascript/lora_deck_tags.js`: which line a booru tag belongs on, for Organize tags.
+- `data/tagmap.json`: its table of known tags and learned last words, served at `/lora-deck/v1/tagmap`. Rebuild it
+  from a newer taxonomy snapshot with `node tools/build_tagmap.js <tags.csv> --check` (`--check` measures it).
 - `style.css`: its looks. The colours come from the WebUI's theme, so it follows light and dark mode.
 
 It writes only a LoRA's card (`<name>.json`) and its preview, when you save in the details, and deletes a LoRA only
 when you confirm it (to the Recycle Bin). The output folders are only read.
+
+## Credits
+
+Organize tags' table of known tags (`data/tagmap.json`) is derived from the
+[Danbooru Tag Taxonomy](https://huggingface.co/datasets/Mexes/danbooru-tag-taxonomy) by Mexes, licensed
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Changes: its slots are mapped onto Organize tags' nine lines,
+only the tags the rules can't place (or clearly misplace) are kept, and the last-word table is derived from it.
 
 ## License
 

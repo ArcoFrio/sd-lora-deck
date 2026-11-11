@@ -21,6 +21,8 @@ The page itself is javascript/lora_deck.js and style.css; this file gives it wha
   GET /lora-deck/v1/firsts           for each LoRA without a preview, the first picture made with it
   GET /lora-deck/v1/metadata?name=   what its .safetensors says about its training
   POST /lora-deck/v1/reveal          show the file in Explorer (Finder, the file manager); only from this computer
+  GET /lora-deck/v1/tagmap           Organize tags' table of known tags (data/tagmap.json, from the Danbooru Tag
+                                     Taxonomy, CC BY 4.0)
   POST /lora-deck/v1/delete          move a LoRA and its own files (card, previews, Civitai info) to the Recycle Bin;
                                      only from this computer
 
@@ -867,6 +869,13 @@ def deck_api(_, app: FastAPI):
                     pass
             meta[k] = v
         return {"metadata": meta, "file": os.path.basename(obj.filename)}
+
+    @app.get("/lora-deck/v1/tagmap")
+    def deck_tagmap():
+        path = os.path.join(EXT_DIR, "data", "tagmap.json")
+        if not os.path.isfile(path):
+            raise HTTPException(404, "No tag table (data/tagmap.json).")
+        return FileResponse(path, media_type="application/json", headers={"Cache-Control": "no-cache"})
 
     @app.post("/lora-deck/v1/delete")
     def deck_delete(req: NameIn, request: Request):

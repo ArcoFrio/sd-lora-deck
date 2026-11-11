@@ -927,7 +927,16 @@
         });
         paintToolbar(d);
     }
+    // Organize tags' table of known tags (data/tagmap.json, ~110 KB): fetched once, the first time it's switched on
+    let tagMapLoad = null;
+    function loadTagMap() {
+        const T = window.LoraDeckTags;
+        if (tagMapLoad || !T || !T.useMap || T.hasMap()) return;
+        tagMapLoad = fetch(`${API}/tagmap`).then((r) => (r.ok ? r.json() : null)).then((m) => { if (m) T.useMap(m); })
+            .catch((e) => console.warn("[LoRA Deck] Organize tags works with its rules alone:", e.message));
+    }
     function paintToolbar(d) {
+        if (prefs.lines) loadTagMap();
         const lb = d.bar.querySelector(".ld-linesbtn");
         lb.classList.toggle("on", prefs.lines);
         lb.setAttribute("aria-pressed", String(prefs.lines));

@@ -209,7 +209,7 @@
     const KIND_LINE = [
         [/\((?:weapon|object|food|animal|creature|instrument|vehicle|computer|phone|drink|dessert|insect|bird|fish|cat|dog|projectile|fruit)\)$/, L.pose],
         [/\((?:symbol|sky|plant|flower|furniture|shape|pattern)\)$/, L.bg],
-        [/\((?:clothes|clothing|accessory|emblem)\)$/, L.outfit],
+        [/\((?:clothes|clothing|accessory|emblem|cosplay)\)$/, L.outfit],  // "hatsune miku (cosplay)": dressed as her
         [/\((?:hairstyle)\)$/, L.looks],
         [/\((?:body|anatomy|organ|marking|feature)\)$/, L.body],
         [/\((?:medium|style|meme|artwork|theme|game|sport)\)$/, L.act],
@@ -225,7 +225,7 @@
     const BG_FALLING = /^(?:falling|floating|flying|scattered|drifting) (?:petals|leaves|feathers|snow|snowflakes|sparkles|confetti|cherry blossoms|bubbles|hearts|stars|embers|ashes)$/;
     const HAND_ACTION = /^(?:hand|hands|holding|grabbing|pulling|adjusting|playing|touching|tucking|twirling|stroking|brushing|tying|cutting|washing|drying|biting|sniffing|smelling|licking|kissing) /;
 
-    function lineOf(tag) {
+    function rulesOf(tag) {
         const t = clean(tag);
         if (!t) return -1;
         if (t === "<lora>") return L.lora;
@@ -274,5 +274,24 @@
         return -1;
     }
 
-    window.LoraDeckTags = { lineOf, clean, LINES: L };
+    // What the rules don't know, from the Danbooru Tag Taxonomy (Mexes, CC BY 4.0; data/tagmap.json, built by
+    // tools/build_tagmap.js): the line of Danbooru tags the rules can't place, and of tags nobody has sorted, by
+    // their last word. The page loads it (useMap) when Organize tags is on; without it the rules work alone.
+    let MAP = null, HEADS = null;
+    function useMap(m) {
+        MAP = new Map();
+        for (const [line, list] of Object.entries((m && m.lines) || {})) for (const tag of list.split("|")) if (tag) MAP.set(tag, Number(line));
+        HEADS = new Map(Object.entries((m && m.heads) || {}).map(([w, line]) => [w, Number(line)]));
+    }
+    function lineOf(tag) {
+        const t = clean(tag);
+        if (MAP && MAP.has(t)) return MAP.get(t);
+        const r = rulesOf(t);
+        if (r >= 0 || !HEADS || t === "<lora>") return r;
+        if (/\([^)]*\)$/.test(t) && !KINDS.test(t)) return -1;  // still a character or a series
+        const words = t.replace(/\s*\([^)]*\)$/, "").split(" ");
+        return words.length > 1 && HEADS.has(words[words.length - 1]) ? HEADS.get(words[words.length - 1]) : -1;
+    }
+
+    window.LoraDeckTags = { lineOf, rulesOf, useMap, clean, LINES: L, hasMap: () => !!MAP };
 })();
