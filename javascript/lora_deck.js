@@ -41,6 +41,9 @@
         act: store.get("act", true) !== false,
         lines: !!store.get("lines", false),  // Organize tags (off: a click adds at the end of the prompt, as the WebUI does)
         motion: store.get("motion", true) !== false,  // the short animations (Windows' "reduce motion" also stops them)
+        gens: store.get("gens", true) !== false,
+        cardPic: clamp(Number(store.get("cardPic", 256)) || 256, 140, 520),
+        dlg: (() => { const v = store.get("dlg", {}); return v && typeof v === "object" ? v : {}; })(),  // the details' sizes, per view  // the card in Edit card, px wide (the WebUI's is 256)  // a LoRA without a preview shows the first picture made with it (nothing saved)
         shape: ["hex", "octa", "card"].includes(store.get("shape", "hex")) ? store.get("shape", "hex") : "hex",
     };
     const savePref = (k, v) => { prefs[k] = v; store.set(k, v); };
@@ -96,6 +99,7 @@
         hex: '<path d="M12 2.8l7.2 4.3v9.8L12 21.2l-7.2-4.3V7.1z"/>',
         octa: '<path d="M8.6 2.8h6.8L19 6.4v11.2l-3.6 3.6H8.6L5 17.6V6.4z"/>',
         rect: '<rect x="5" y="3.5" width="14" height="17" rx="3"/>',
+        move: '<path d="M12 3.5v17M3.5 12h17M12 3.5 9.5 6M12 3.5 14.5 6M12 20.5 9.5 18M12 20.5l2.5-2.5M3.5 12 6 9.5M3.5 12 6 14.5M20.5 12 18 9.5M20.5 12 18 14.5"/>',
     };
     const ic = (name, cls) => `<svg class="ld-i${cls ? " " + cls : ""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 
@@ -141,25 +145,34 @@
     // Where the cards in view are now (null: don't animate); play() then moves the ones that stay from there to their
     // new place and fades the new ones in, so a search, folder, sort or shape change shows where things went.
     function snapshot(d) {
-        if (!motionOn() || !d.grid.offsetParent) return null;
+        if (!motionOn() || !d.grid.offsetParent || !d.list) return null;
         const g = d.grid.getBoundingClientRect();
         const map = new Map();
-        for (const c of d.grid.children) {
+        for (const c of d.list.children) {
             if (!c.dataset.name) continue;
             const r = c.getBoundingClientRect();
+            if (r.width && r.top > g.bottom + 80) break;  // the cards go row by row: the rest are further down
             if (inView(r, g, 80)) map.set(c.dataset.name, r);
         }
         return map;
     }
     function play(d, before) {
         if (!before) return;
+        // the moves still running stop first (their transform would skew the reading), then every position is read
+        // before any animation starts, so the page is laid out once, not once per card
+        (d.moving || []).forEach((a) => a.cancel());
+        d.moving = [];
+        if (!d.list) return;
         const g = d.grid.getBoundingClientRect();
-        let k = 0;
-        for (const c of d.grid.children) {
+        const todo = [];
+        for (const c of d.list.children) {
             if (!c.dataset.name) continue;
-            c.getAnimations().forEach((a) => { if (a.id === "ld-move") a.cancel(); });
             const r = c.getBoundingClientRect();
-            if (!inView(r, g, 0)) continue;
+            if (r.width && r.top > g.bottom) break;
+            if (inView(r, g, 0)) todo.push([c, r]);
+        }
+        let k = 0;
+        for (const [c, r] of todo) {
             const old = before.get(c.dataset.name);
             let a;
             if (old) {
@@ -172,6 +185,7 @@
                     { duration: 200, easing: EASE, delay: Math.min(k++ * 10, 120), fill: "backwards" });
             }
             a.id = "ld-move";
+            d.moving.push(a);
         }
     }
     // A number that counts to its new value (the "24 of 352" line).
@@ -305,9 +319,9 @@
         const ch = it._choices;
         if (!ch) return null;
         const order = ch.options.map((_, i) => i).sort((a, b) => ch.compose(b).length - ch.compose(a).length);
-        for (const i of order) if (hasText(prompt, ch.compose(i))) return i;
+        for (const i of order) if (hasText(prompt, ch.compose(i), it)) return i;
         const none = ch.compose(-1);
-        return none && hasText(prompt, none) ? -1 : null;
+        return none && hasText(prompt, none, it) ? -1 : null;
     }
 
     // --- the prompt ---------------------------------------------------------------------------------------------
@@ -359,12 +373,15 @@
         if (a && b && !/\n$/.test(a) && !/^\n/.test(b)) a += " ";
         return a + b;
     }
-    // Organize tags: one line per kind of tag: 1 LoRAs, 2 activation, 3 participants, 4 appearance, 5 body,
-    // 6 outfit, 7 pose and expression, 8 background, 9 camera; every line ends with a comma. An activation text written
-    // one kind per line in that order from line 2 (trigger, 1girl, looks, body, outfit) has each of its lines go to its
-    // own line; a one-line activation text goes to line 2. Tags go at the end of their line, lines that don't exist yet are added empty, and a tag already on its line
-    // isn't added twice (two characters both bring "1girl").
-    const LINE_LORA = 0, LINE_ACT = 1, LINE_LOOKS = 3;
+    // Organize tags: one line per kind of tag: 1 LoRAs, 2 activation (triggers, style and quality), 3 participants,
+    // 4 appearance, 5 body, 6 outfit, 7 pose, objects and expression, 8 background, 9 camera; every line ends with a comma.
+    // Each tag goes to the line its meaning says (lora_deck_tags.js). A LoRA's own made-up tags on its card's first line
+    // are its triggers (the backend marks which tags of a card aren't real booru tags) and stay on the activation line;
+    // on later card lines a tag the meaning can't place goes with the rest of its line ("anisdefault" among outfit tags
+    // is the outfit).
+    // Tags go at the end of their line, lines that don't exist yet are added empty, and a tag already on its line isn't
+    // added twice (two characters both bring "1girl").
+    const LINE_LORA = 0, LINE_ACT = 1;
     const normTag = (s) => s.trim().replace(/\s+/g, " ").toLowerCase();
     const tagsOf = (line) => String(line || "").split(",").map((s) => s.trim()).filter(Boolean);
     function lineAdd(lines, n, tags) {
@@ -388,22 +405,48 @@
         if (rest.length !== before.length) lines[n] = rest.length ? rest.join(", ") + "," : "";
     }
     const joinLines = (lines) => (lines.every((l) => !l.trim()) ? "" : lines.join("\n"));
-    // Is this activation text in the prompt line by line (each of its lines' tags on its own line)?
-    function onLines(prompt, text) {
-        const pl = prompt.split("\n");
-        const segs = String(text || "").trim().split("\n");
-        return segs.some((seg) => tagsOf(seg).length) && segs.every((seg, k) => {
-            const want = tagsOf(seg);
-            if (!want.length) return true;
-            const have = new Set(tagsOf(pl[LINE_ACT + k]).map(normTag));
-            return want.every((tg) => have.has(normTag(tg)));
+    // [[line, tag], ...]: where each tag of an activation text goes
+    function placed(text, it) {
+        const T = window.LoraDeckTags;
+        const made = it && Array.isArray(it.made_up) ? new Set(it.made_up) : null;
+        const out = [];
+        String(text || "").trim().split("\n").forEach((seg, k) => {
+            const tags = tagsOf(seg);
+            if (!T) return tags.forEach((tg) => out.push([LINE_ACT + k, tg]));  // the classifier didn't load: card order
+            const lines = tags.map((tg, i) => {
+                // a card's own triggers: its made-up tags on its first line (without the tag lists: its first tag).
+                // On later lines the meaning decides, and only a tag it can't place goes with its line.
+                const own = k === 0 && (made ? made.has(T.clean(tg)) : i === 0);
+                const n = own ? -1 : T.lineOf(tg);
+                return n === LINE_LORA ? LINE_ACT : n;
+            });
+            let major = LINE_ACT;
+            if (k > 0) {
+                const count = {};
+                lines.forEach((n) => { if (n > LINE_ACT) count[n] = (count[n] || 0) + 1; });
+                const best = Object.keys(count).sort((a, b) => count[b] - count[a])[0];
+                if (best != null) major = Number(best);
+            }
+            tags.forEach((tg, i) => out.push([lines[i] >= 0 ? lines[i] : major, tg]));
         });
+        return out;
+    }
+    // Is this activation text in the prompt with each tag on its line?
+    function onLines(prompt, text, it) {
+        const pl = prompt.split("\n");
+        const pairs = placed(text, it);
+        return pairs.length > 0 && pairs.every(([n, tg]) => tagsOf(pl[n]).some((x) => normTag(x) === normTag(tg)));
     }
     // ...or as one piece (added at the end)?
-    function hasText(prompt, text) {
+    function hasText(prompt, text, it) {
         text = String(text || "").trim();
-        return !!text && (prompt.includes(text.replace(/,$/, "")) || onLines(prompt, text));
+        return !!text && (prompt.includes(text.replace(/,$/, "")) || onLines(prompt, text, it));
     }
+    const hasNeg = (neg, text) => {
+        const have = new Set(tagsOf(neg.replace(/\n/g, ",")).map(normTag));
+        const want = tagsOf(String(text || "").replace(/\n/g, ","));
+        return want.length > 0 && (neg.includes(String(text).trim()) || want.every((tg) => have.has(normTag(tg))));
+    };
     // The tags the other LoRAs in the prompt brought to each line (the choice of theirs that is there): taking one
     // LoRA out leaves those ("1girl").
     function keptTags(prompt, except) {
@@ -411,12 +454,9 @@
         inPrompt(prompt).on.forEach((_, name) => {
             const o = data.by.get(name);
             if (!o || o.name === except.name || !o.activation) return;
-            const v = variants(o).find((x) => hasText(prompt, x));
+            const v = variants(o).find((x) => hasText(prompt, x, o));
             if (!v) return;
-            v.split("\n").forEach((seg, k) => {
-                const s = sets[LINE_ACT + k] || (sets[LINE_ACT + k] = new Set());
-                tagsOf(seg).forEach((tg) => s.add(normTag(tg)));
-            });
+            placed(v, o).forEach(([n, tg]) => (sets[n] || (sets[n] = new Set())).add(normTag(tg)));
         });
         return sets;
     }
@@ -424,10 +464,10 @@
     // else as one piece.
     function cutText(prompt, text, it) {
         text = String(text || "").trim();
-        if (onLines(prompt, text)) {
+        if (onLines(prompt, text, it)) {
             const lines = prompt.split("\n");
             const keep = keptTags(prompt, it);
-            text.split("\n").forEach((seg, k) => lineRemove(lines, LINE_ACT + k, tagsOf(seg), keep[LINE_ACT + k]));
+            placed(text, it).forEach(([n, tg]) => lineRemove(lines, n, [tg], keep[n]));
             return joinLines(lines);
         }
         for (const v of [text, text.replace(/,$/, "")]) {
@@ -436,9 +476,9 @@
         }
         return prompt;
     }
-    function putText(prompt, text) {
+    function putText(prompt, text, it) {
         const lines = prompt.split("\n");
-        String(text || "").trim().split("\n").forEach((seg, k) => lineAdd(lines, LINE_ACT + k, tagsOf(seg)));
+        placed(text, it).forEach(([n, tg]) => lineAdd(lines, n, [tg]));
         return lines.join("\n");
     }
     const weightOf = (it) => (it.weight ? it.weight : data.meta.default_weight || 1);
@@ -451,7 +491,7 @@
             const lines = p.split("\n");
             lineAdd(lines, LINE_LORA, [tag]);
             p = lines.join("\n");
-            if (actText) p = putText(p, actText);
+            if (actText) p = putText(p, actText, it);
         } else {
             p = append(p, actText ? `${tag} ${actText}` : tag);
         }
@@ -459,7 +499,7 @@
         const neg = (it.negative || "").trim();
         if (neg) {
             const nb = promptBox(tab, true);
-            if (nb && !hasText(nb.value, neg)) {
+            if (nb && !hasNeg(nb.value, neg)) {
                 if (prefs.lines) {
                     const lines = nb.value.split("\n");
                     lineAdd(lines, Math.max(0, lines.length - 1), tagsOf(neg.replace(/\n/g, ",")));
@@ -476,7 +516,7 @@
         if (!box) return;
         let p = box.value;
         const m = findTag(p, it);
-        const v = variants(it).find((x) => hasText(p, x));
+        const v = variants(it).find((x) => hasText(p, x, it));
         if (v) p = cutText(p, v, it);  // before the tag goes, so the other LoRAs' tags are still known
         if (m) {
             const lines = p.split("\n");
@@ -489,7 +529,7 @@
         write(box, p);
         const neg = (it.negative || "").trim();
         const nb = promptBox(tab, true);
-        if (neg && nb && hasText(nb.value, neg)) {
+        if (neg && nb && hasNeg(nb.value, neg)) {
             const r = cutOnce(nb.value, neg);
             if (r != null) write(nb, r);
             else {
@@ -518,25 +558,27 @@
         const m = findTag(box.value, it);
         if (!m) return addLora(tab, it, next);
         let p = box.value;
-        const v = variants(it).find((x) => hasText(p, x));
-        if (v && p.includes(v) && !onLines(p, v)) p = p.replace(v, next);  // added as one piece: swap it in place
+        const v = variants(it).find((x) => hasText(p, x, it));
+        if (v && p.includes(v) && !onLines(p, v, it)) p = p.replace(v, next);  // added as one piece: swap it in place
         else {
             if (v) p = cutText(p, v, it);
-            p = prefs.lines ? putText(p, next) : p.replace(m[0], `${m[0]} ${next}`);
+            p = prefs.lines ? putText(p, next, it) : p.replace(m[0], `${m[0]} ${next}`);
         }
         write(box, p);
         refreshAll();
     }
-    // With Organize tags, a trigger word goes on the activation line and a training tag on the appearance line
-    // (otherwise at the end of the prompt).
-    function addWords(tab, words, line) {
+    // With Organize tags, a word goes to the line its meaning says (a made-up word to the activation line);
+    // otherwise at the end of the prompt.
+    function addWords(tab, words) {
         const box = promptBox(tab);
         if (!box) return;
         const w = words.trim().replace(/,$/, "");
         if (tagsOf(box.value.replace(/\n/g, ",")).some((tg) => normTag(tg) === normTag(w))) return toast("Already in the prompt");
         if (prefs.lines) {
             const lines = box.value.split("\n");
-            lineAdd(lines, Number.isFinite(line) ? line : LINE_ACT, [w]);
+            const T = window.LoraDeckTags;
+            const n = T ? T.lineOf(w) : -1;
+            lineAdd(lines, n > LINE_LORA ? n : LINE_ACT, [w]);
             write(box, lines.join("\n"));
         } else write(box, append(box.value, w + ","));
         toast(`Added: ${w}`);
@@ -550,7 +592,35 @@
         it._choices = parseChoices(it.activation);
         it._hay = [it.name, it._title, it.alias, it.folder, it.activation, it.notes, it.description.slice(0, 400), it.base_model,
             ...(it.trained_words || []), ...(it.tags || []).slice(0, 15).map((t) => t[0])].join(" \n").toLowerCase();
+        return withGen(it);
+    }
+    // "Gens as previews": a LoRA without a preview shows the first picture made with it (only shown, never saved)
+    function withGen(it) {
+        const g = prefs.gens && !it.preview && data.firsts ? data.firsts[it.name] : null;
+        if (g) Object.assign(it, { preview: "gen", gen: g, pw: g.w, ph: g.h });
         return it;
+    }
+    function applyGens(fetchAgain) {
+        const paint = () => {
+            const changed = [];
+            for (const it of data.items) {
+                const was = it.preview === "gen" ? it.gen.id : "";
+                if (was) Object.assign(it, { preview: null, gen: null, pw: 0, ph: 0 });
+                withGen(it);
+                if (was !== (it.preview === "gen" ? it.gen.id : "")) changed.push(it.name);
+            }
+            if (!changed.length) return;
+            everyDeck((d) => {
+                changed.forEach((n) => d.cards.delete(n));
+                renderAll(d);
+            });
+        };
+        if (!prefs.gens || (data.firsts && !fetchAgain)) return Promise.resolve(paint());
+        return api("firsts").then((r) => {
+            data.firsts = r.firsts || {};
+            data.genDirs = r.dirs || [];
+            paint();
+        }, (e) => console.warn("[LoRA Deck] could not look through the gens:", e.message));
     }
     function load(refresh) {
         if (data.loading && !refresh) return data.loading;
@@ -568,6 +638,7 @@
                 data.error = "";
                 Object.values(decks).forEach((d) => { d.cards.clear(); });
                 buildTree();
+                if (prefs.gens) setTimeout(() => applyGens(true));  // after the cards are up: it reads the output folders
             })
             .catch((e) => {
                 data.error = `The LoRA list could not be read (${e.message}). Restart the WebUI if the extension was just added.`;
@@ -655,7 +726,10 @@
         return WIDTHS.find((w) => w >= px) || WIDTHS[WIDTHS.length - 1];
     }
     const isVideo = (it) => it.preview === "moving" && it.pext !== "gif";
-    const thumbUrl = (it, w) => `${API}/thumb?name=${encodeURIComponent(it.name)}&w=${w}&v=${it.pv || it.mtime}`;
+    // its preview; a gen (preview "gen") when it has none; a picture picked in Edit preview and not saved yet (_src)
+    const genThumb = (g, w) => `${API}/gen-thumb?id=${encodeURIComponent(g.id)}&w=${w}&v=${g.t}`;
+    const thumbUrl = (it, w) => it._src || (it.preview === "gen" ? genThumb(it.gen, w)
+        : `${API}/thumb?name=${encodeURIComponent(it.name)}&w=${w}&v=${it.pv || it.mtime}`);
 
     function mount(tab) {
         const host = app().querySelector(`#${tab}_lora_controls`);
@@ -731,10 +805,11 @@
                 if (d.grid.clientWidth !== last) {
                     last = d.grid.clientWidth;
                     layout(d);
-                }
+                } else fillWindow(d);
                 placeIndicator(d);
             }).observe(d.root);
         }
+        d.grid.addEventListener("scroll", () => fillWindow(d), { passive: true });
         applyClassic(d);
         if (data.ready) {
             d.path = startPath(d);
@@ -763,8 +838,7 @@
                 d.q = "";
                 renderAll(d);
             } else if (e.key === "Enter") {
-                const first = d.grid.querySelector(".ld-card");
-                if (first) first.focus();
+                if (d.shown && d.shown.length) revealIndex(d, 0);
             }
         });
         bar.querySelector(".ld-clear").addEventListener("click", () => {
@@ -852,39 +926,154 @@
         document.documentElement.classList.toggle("ld-still", !motionOn());
     }
     // Hexagons sit in a honeycomb of long and short rows: a row of N, then a row of N-1 sitting in its gaps (half a card
-    // in), each tucked into the tips of the row above, so both edges stay straight. CSS grid can't make rows of two
-    // lengths, so every card is placed here (again on every resize).
+    // in), each tucked into the tips of the row above, so both edges stay straight. The other shapes sit in a plain grid
+    // that fills the width.
+    //
+    // Every card's place is worked out here, but only the rows in view and a few around them are on the page (a few
+    // dozen cards instead of hundreds), so scrolling a long list stays smooth. Scrolling brings the next rows in and
+    // drops the ones far away; a card that only arrives once it's already in sight (a fast scroll) fades in.
     const HEX_TIP = 0.27;  // the height of a hexagon's top (and bottom) point, as a share of its width
     const GAP = 12;
+    const ROW_GAP = 16;
+    const ACT_H = 11.5 * 1.38 * 2;  // the activation text under a card: two lines of it
+    function ensureList(d) {
+        if (d.list && d.list.parentNode === d.grid) return;
+        d.list = el("div", "ld-vlist");
+        d.grid.replaceChildren(d.list);
+        d.grid.classList.add("ld-virtual");
+        d.lo = 0;
+        d.hi = -1;
+    }
     function layout(d) {
-        const cards = [...d.grid.children].filter((c) => c.classList.contains("ld-card"));
-        if (prefs.shape !== "hex") {
-            d.grid.style.removeProperty("--ld-cols");
-            cards.forEach((c) => {
-                for (const k of ["translate", "margin-top", "grid-row", "grid-column"]) c.style.removeProperty(k);
-            });
-            return;
+        if (!d.list || d.list.parentNode !== d.grid) return;
+        const n = (d.shown || []).length;
+        const cs = getComputedStyle(d.grid);
+        const padT = parseFloat(cs.paddingTop) || 0;
+        const room = Math.max(60, d.grid.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0));
+        const hex = prefs.shape === "hex";
+        let cols, colW, rowH, step, x0 = 0;
+        if (hex) {
+            colW = prefs.size;
+            cols = Math.max(1, Math.floor((room + GAP) / (colW + GAP)));
+            rowH = (colW - 5) * 1.5 + 5;  // the picture (2.5px in from the frame) and its frame
+            step = rowH - (colW * HEX_TIP - GAP * 0.55);  // the next row tucks into this one's points
+            x0 = Math.max(0, (room - (cols * colW + (cols - 1) * GAP)) / 2);
+        } else {
+            cols = Math.max(1, Math.floor((room + GAP) / (prefs.size + GAP)));
+            colW = (room - (cols - 1) * GAP) / cols;
+            const act = prefs.act && colW > 150;
+            const key = `${prefs.shape}|${colW.toFixed(2)}|${act}`;
+            rowH = d.rowHKey === key ? d.rowH
+                : prefs.shape === "octa" ? (colW - 5) * 1.5 + 2.5 + (act ? 9 + ACT_H : 0) : colW * 1.5 + (act ? 7 + ACT_H : 0);
+            d.rowKey = key;
+            step = rowH + ROW_GAP;
         }
-        const w = prefs.size;
-        const room = d.grid.clientWidth - 16;
-        const cols = Math.max(1, Math.floor((room + GAP) / (w + GAP)));
-        d.grid.style.setProperty("--ld-cols", cols);
-        const tuck = -(w * HEX_TIP - GAP * 0.55);
+        const xs = new Float64Array(n), rows = new Int32Array(n), rowStart = [];
         const short = cols > 1 ? cols - 1 : 1;
         let row = 0, col = 0;
-        cards.forEach((c) => {
-            const len = row % 2 ? short : cols;
-            if (col >= len) {
+        for (let i = 0; i < n; i++) {
+            if (col >= (hex && row % 2 ? short : cols)) {
                 row++;
                 col = 0;
             }
-            const half = row % 2 && cols > 1;
-            c.style.gridRow = String(row + 1);
-            c.style.gridColumn = String(col + 1);
-            c.style.translate = half ? `${(w + GAP) / 2}px 0` : "";
-            c.style.marginTop = row ? `${tuck}px` : "";
+            if (!col) rowStart.push(i);
+            xs[i] = x0 + col * (colW + GAP) + (hex && row % 2 && cols > 1 ? (colW + GAP) / 2 : 0);
+            rows[i] = row;
             col++;
-        });
+        }
+        const nrows = n ? row + 1 : 0;
+        rowStart.push(n);
+        d.geo = { hex, cols, colW, rowH, step, padT, xs, rows, rowStart, nrows };
+        d.list.style.height = (nrows ? (nrows - 1) * step + rowH : 0) + "px";
+        d.list.style.setProperty("--ld-colw", colW + "px");
+        for (const c of d.list.children) place(d, c);
+        fillWindow(d);
+        // the cards' real height (their text, the theme's fonts) once one is on the page: placed again if it differs
+        const c0 = !hex && d.list.firstElementChild;
+        if (c0 && c0.offsetHeight && Math.abs(c0.offsetHeight - rowH) > 0.5 && d.rowHKey !== d.rowKey) {
+            d.rowH = c0.offsetHeight;
+            d.rowHKey = d.rowKey;
+            layout(d);
+        }
+    }
+    function place(d, c) {
+        const g = d.geo;
+        if (!g || c._i == null || c._i >= g.xs.length) return;
+        c.style.left = g.xs[c._i] + "px";
+        c.style.top = g.rows[c._i] * g.step + "px";
+    }
+    // the cards from a few rows above the view to a few below it; fresh: start over (a new list of cards)
+    function fillWindow(d, fresh) {
+        const g = d.geo;
+        if (!g || !d.list) return;
+        const n = d.shown.length;
+        if (fresh || !n) {
+            d.list.replaceChildren();
+            d.lo = 0;
+            d.hi = -1;
+        }
+        if (!n) return;
+        const top = d.grid.scrollTop - g.padT, h = d.grid.clientHeight || 800;
+        const buf = Math.max(h * 0.75, g.step * 2);
+        const last = g.nrows - 1;
+        const r0 = clamp(Math.floor((top - buf) / g.step), 0, last), r1 = clamp(Math.floor((top + h + buf) / g.step), 0, last);
+        const lo = g.rowStart[r0], hi = g.rowStart[r1 + 1] - 1;
+        if (hi < d.lo || lo > d.hi) {  // no card in common (a jump): start over
+            d.list.replaceChildren();
+            d.lo = lo;
+            d.hi = lo - 1;
+        }
+        while (d.lo < lo && d.list.firstElementChild) {
+            d.list.firstElementChild.remove();
+            d.lo++;
+        }
+        while (d.hi > hi && d.list.lastElementChild) {
+            d.list.lastElementChild.remove();
+            d.hi--;
+        }
+        const make = (i) => {
+            const c = cardFor(d, d.shown[i], d.w);
+            c._i = i;
+            place(d, c);
+            paintCard(d, c);
+            return c;
+        };
+        const added = [];
+        if (d.lo > lo) {
+            const head = [];
+            for (let i = lo; i < d.lo; i++) head.push(make(i));
+            d.list.prepend(...head);
+            added.push(...head);
+            d.lo = lo;
+        }
+        if (d.hi < hi) {
+            const tail = [];
+            for (let i = d.hi + 1; i <= hi; i++) tail.push(make(i));
+            d.list.append(...tail);
+            added.push(...tail);
+            d.hi = hi;
+        }
+        // a card that arrives already in sight (the scroll outran the rows kept ready) fades in instead of popping
+        if (fresh || !added.length || !motionOn()) return;
+        const v0 = Math.floor(top / g.step) - 1, v1 = Math.floor((top + h) / g.step);
+        let k = 0;
+        for (const c of added) {
+            const r = g.rows[c._i];
+            if (r < v0 || r > v1) continue;
+            c.animate([{ opacity: 0, transform: "scale(.94)" }, { opacity: 1, transform: "none" }],
+                { duration: 220, easing: EASE, delay: Math.min(k++ * 12, 96), fill: "backwards" });
+        }
+    }
+    // make card i visible (scrolling to it if needed) and focus it
+    function revealIndex(d, j) {
+        const g = d.geo;
+        if (!g || !d.shown || !d.shown[j]) return;
+        const y = g.padT + g.rows[j] * g.step, h = d.grid.clientHeight;
+        if (y < d.grid.scrollTop + 8) d.grid.scrollTop = y - 8;
+        else if (y + g.rowH > d.grid.scrollTop + h - 8) d.grid.scrollTop = y + g.rowH - h + 8;
+        fillWindow(d);
+        const c = d.cards.get(d.shown[j].name);
+        if (c) c.focus({ preventScroll: true });
     }
     let sizeTimer = null;
     function setSize(px, animate) {  // animated for the two buttons; the slider and the wheel follow the hand instead
@@ -914,6 +1103,7 @@
         m.innerHTML = `
           ${row("act", "Activation text under the cards", "A line of what a click adds", "lines")}
           ${row("lines", "Organize tags", "One line per kind of tag: LoRA tags on line 1, activation text on lines 2 to 6, empty lines added", "list")}
+          ${row("gens", "Gens as previews", "A LoRA without a preview shows the first picture made with it, from the WebUI's output folders (nothing is saved)", "image")}
           <div class="ld-sep"></div>
           ${row("motion", "Animations", "Short moves when the cards change, a LoRA is added or a weight changes", "spark")}
           <div class="ld-sep"></div>
@@ -928,6 +1118,9 @@
             if (k === "classic") {
                 closeFloating();
                 everyDeck(applyClassic);
+            } else if (k === "gens") {
+                applyGens();
+                toast(prefs.gens ? "LoRAs without a preview show their first gen" : "Gens as previews: off");
             } else everyDeck(paintToolbar);
         });
         placeFloating(m, anchor, "end");
@@ -1003,11 +1196,23 @@
         }, { passive: false });
     }
     function moveFocus(d, card, key) {
-        const cards = [...d.grid.querySelectorAll(".ld-card")];
-        const i = cards.indexOf(card);
-        const cols = Math.max(1, Math.round(d.grid.clientWidth / (card.offsetWidth + 12)));
-        const j = clamp(i + ({ ArrowRight: 1, ArrowLeft: -1, ArrowDown: cols, ArrowUp: -cols })[key], 0, cards.length - 1);
-        cards[j].focus();
+        const g = d.geo;
+        const i = card._i;
+        if (!g || i == null) return;
+        let j = i + (key === "ArrowRight" ? 1 : key === "ArrowLeft" ? -1 : 0);
+        if (key === "ArrowDown" || key === "ArrowUp") {  // the nearest card in the next row up or down
+            const r = g.rows[i] + (key === "ArrowDown" ? 1 : -1);
+            if (r < 0 || r >= g.nrows) return;
+            let best = Infinity;
+            for (let k = g.rowStart[r]; k < g.rowStart[r + 1]; k++) {
+                const dx = Math.abs(g.xs[k] - g.xs[i]);
+                if (dx < best) {
+                    best = dx;
+                    j = k;
+                }
+            }
+        }
+        revealIndex(d, clamp(j, 0, d.shown.length - 1));
     }
     function primary(d, it, card) {
         if (d.on.has(it.name)) return openInfo(d.tab, it);
@@ -1057,6 +1262,7 @@
         }
     }
     function renderSkeleton(d) {
+        d.grid.classList.remove("ld-virtual");
         d.grid.innerHTML = Array.from({ length: 12 }, () => '<div class="ld-card ld-ghost"><div class="ld-media"></div><div class="ld-act"></div></div>').join("");
     }
     function visible(d) {
@@ -1092,6 +1298,7 @@
         if (!d.root) return;
         if (!data.ready) {
             if (data.error) {
+                d.grid.classList.remove("ld-virtual");
                 d.grid.innerHTML = "";
                 d.empty.hidden = false;
                 d.empty.innerHTML = `<div class="ld-empty-art">${ic("warn")}</div><b>LoRA Deck could not load</b><span>${esc(data.error)}</span>
@@ -1104,9 +1311,13 @@
         readPrompt(d);
         renderNav(d);
         const { shown, elsewhere, total } = visible(d);
-        const w = thumbWidth();
         const before = snapshot(d);
-        d.grid.replaceChildren(...shown.map((it) => cardFor(d, it, w)));
+        ensureList(d);
+        d.shown = shown;
+        d.w = thumbWidth();
+        d.list.replaceChildren();
+        d.lo = 0;
+        d.hi = -1;
         layout(d);
         paintOn(d);
         play(d, before);
@@ -1188,6 +1399,45 @@
             renderAll(d);
         };
     }
+    // --- the picture in its card -----------------------------------------------------------------------------------
+    // A framing is {x, y, z}: the point of the picture (as a share of its width and height) at the card's centre, and
+    // the zoom (1: the picture just covers the card; less shows more of it over a blurred copy, more zooms in). Without
+    // one saved, a picture of about the card's shape fills it, and any other shows whole, so square or wide previews
+    // aren't trimmed.
+    const CARD_RATIO = 2 / 3;
+    const tierFor = (px) => WIDTHS.find((x) => x >= px) || WIDTHS[WIDTHS.length - 1];
+    const ratioOf = (it) => (it.pw && it.ph ? it.pw / it.ph : CARD_RATIO);
+    function wholeZoom(it) {
+        const k = ratioOf(it) / CARD_RATIO;
+        return k > 1 ? 1 / k : k;
+    }
+    function framingOf(it) {
+        if (it.framing) return it.framing;
+        const k = ratioOf(it) / CARD_RATIO;
+        if (k > 0.86 && k < 1.16) return { x: 0.5, y: 0.42, z: 1, auto: true };
+        return { x: 0.5, y: 0.5, z: wholeZoom(it), auto: true };
+    }
+    // where the picture goes, in % of the card's picture box; kept from leaving it (raw: as given)
+    function placePic(it, fr, raw) {
+        const k = ratioOf(it) / CARD_RATIO;
+        const w = (k > 1 ? k * 100 : 100) * fr.z, h = (k > 1 ? 100 : 100 / k) * fr.z;
+        let left = 50 - fr.x * w, top = 50 - fr.y * h;
+        if (!raw) {
+            left = w >= 100 ? clamp(left, 100 - w, 0) : clamp(left, 0, 100 - w);
+            top = h >= 100 ? clamp(top, 100 - h, 0) : clamp(top, 0, 100 - h);
+        }
+        return { left, top, w, h, gaps: w < 99.5 || h < 99.5 };
+    }
+    function clampFraming(it, fr) {
+        const p = placePic(it, fr);
+        const out = { x: (50 - p.left) / p.w, y: (50 - p.top) / p.h, z: fr.z };
+        if (fr.auto) out.auto = true;  // still the automatic one (saved as none, so it follows the picture)
+        return out;
+    }
+    const picStyle = (p) => `left:${p.left.toFixed(3)}%;top:${p.top.toFixed(3)}%;width:${p.w.toFixed(3)}%;height:${p.h.toFixed(3)}%`;
+    // a zoomed-in or wide picture needs more pixels than the card is wide
+    const picTier = (it, w) => tierFor(w * Math.max(1, placePic(it, framingOf(it)).w / 100));
+
     function cardFor(d, it, w) {
         let c = d.cards.get(it.name);
         if (c && c.dataset.w === String(w)) {
@@ -1207,7 +1457,7 @@
         const sub = [it.folder ? segLabel(it.folder.split("/").pop()) : "", it._choices ? `${it._choices.options.length} choices` : ""].filter(Boolean).join(" · ");
         const media = isVideo(it)
             ? `<video class="ld-pic" src="${thumbUrl(it, w)}" muted loop playsinline preload="metadata"></video>`
-            : it.preview ? `<img class="ld-pic" src="${thumbUrl(it, w)}" alt="" loading="lazy" decoding="async" draggable="false">`
+            : it.preview ? framedPic(it, w)
                 : `<div class="ld-nopic"><span>${esc(it._title.replace(/[^A-Za-z0-9]/g, "").slice(0, 2) || "?")}</span></div>`;
         c.innerHTML = `
           <div class="ld-frame" aria-hidden="true"></div>
@@ -1243,13 +1493,19 @@
         d.cards.set(it.name, c);
         return c;
     }
+    function framedPic(it, w) {
+        const p = placePic(it, framingOf(it));
+        return `${p.gaps ? `<img class="ld-pic-bg" src="${thumbUrl(it, 160)}" alt="" aria-hidden="true" loading="lazy" decoding="async">` : ""}`
+            + `<img class="ld-pic ld-framed" style="${picStyle(p)}" src="${thumbUrl(it, picTier(it, w))}" alt="" loading="lazy" decoding="async" draggable="false">`;
+    }
     function updateThumb(c, it, w) {
         const pic = c.querySelector(".ld-pic");
         c.dataset.w = String(w);
-        if (pic && pic.tagName === "IMG") pic.src = thumbUrl(it, w);
+        if (pic && pic.tagName === "IMG") pic.src = thumbUrl(it, picTier(it, w));
     }
     function updateThumbs(d) {
         const w = thumbWidth();
+        d.w = w;  // the cards that come onto the page later get it then (cardFor)
         d.grid.querySelectorAll(".ld-card[data-name]").forEach((c) => {
             const it = data.by.get(c.dataset.name);
             if (it && c.dataset.w !== String(w) && Number(c.dataset.w) < w) updateThumb(c, it, w);
@@ -1265,21 +1521,23 @@
         d.on = on;
         d.unknown = unknown;
     }
+    function paintCard(d, c, prev) {
+        const name = c.dataset.name;
+        const w = d.on.get(name);
+        const on = w != null;
+        c.classList.toggle("on", on);
+        c.setAttribute("aria-current", on ? "true" : "false");
+        if (on) {
+            c.querySelectorAll(".ld-w").forEach((s) => {
+                if (s.textContent === w) return;
+                s.textContent = w;
+                if (prev && prev.has(name) && prev.get(name) !== w && c.isConnected) roll(s, Number(w) > Number(prev.get(name)));
+            });
+        }
+    }
     function paintOn(d) {
         const prev = d.prevW || new Map();
-        d.cards.forEach((c, name) => {
-            const w = d.on.get(name);
-            const on = w != null;
-            c.classList.toggle("on", on);
-            c.setAttribute("aria-current", on ? "true" : "false");
-            if (on) {
-                c.querySelectorAll(".ld-w").forEach((s) => {
-                    if (s.textContent === w) return;
-                    s.textContent = w;
-                    if (prev.has(name) && prev.get(name) !== w) roll(s, Number(w) > Number(prev.get(name)));
-                });
-            }
-        });
+        d.cards.forEach((c) => paintCard(d, c, prev));
         const chips = [...d.on.entries()].map(([name, w]) => {
             const it = data.by.get(name);
             const pic = it.preview && !isVideo(it) ? `<img src="${thumbUrl(it, 160)}" alt="" loading="lazy">` : `<span>${esc(it._title.slice(0, 1))}</span>`;
@@ -1459,18 +1717,26 @@
         if (first) first.focus();
     }
 
-    // --- details --------------------------------------------------------------------------------------------------
+    // --- details: one dialog with four views that morph into each other ---------------------------------------------
+    //   info    the card's details (the picture whole on the left)
+    //   frame   Edit preview: the picture in a card-shaped frame, dragged and zoomed; other shapes to try; upload
+    //   card    Edit card: the card's texts (the picture moves to the top right)
+    //   meta    Metadata: what the file says about its training (the same)
+    // ✕ (or Esc) goes back to the details from the other three; a click outside closes the dialog.
     let infoState = null;
-    function forgeEvent(name) {
-        // The WebUI's editor and metadata viewer read the card's name two levels above the clicked button
-        const card = el("div");
-        card.setAttribute("data-name", name);
-        const row = el("div");
-        const btn = el("span");
-        row.appendChild(btn);
-        card.appendChild(row);
-        return { target: btn, stopPropagation() {}, preventDefault() {} };
-    }
+    // the reveal runs on the WebUI's computer, and it only answers this computer, so the browser's system names it
+    const REVEAL_IN = /Windows/i.test(navigator.userAgent) ? "Explorer" : /Mac/i.test(navigator.userAgent) ? "Finder" : "file manager";
+    // a picture can be moved and zoomed in its card; a video shows whole, and no preview has nothing to move
+    const framable = (it) => !!it.preview && !isVideo(it);
+    // the picture Edit preview shows: one picked there (a gen or an upload, not saved yet), or the LoRA's own
+    const fit = (st) => (st.pick ? st.pick.it : st.it);
+    const api = (path, body) => fetch(`${API}/${path}`, body === undefined ? { cache: "no-store" } : {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }).then(async (r) => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || `the WebUI answered ${r.status}`);
+        return j;
+    });
     function closeInfo() {
         const w = document.querySelector(".ld-modal-wrap");
         if (w) w.remove();
@@ -1479,44 +1745,794 @@
         infoState = null;
     }
     function infoKeys(e) {
-        if (!infoState) return;
+        const st = infoState;
+        if (!st) return;
         if (e.key === "Escape") {
             e.stopPropagation();
-            closeInfo();
-        } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && !/input|textarea/i.test(e.target.tagName)) {
-            const d = decks[infoState.tab];
-            const list = [...d.grid.querySelectorAll(".ld-card[data-name]")].map((c) => c.dataset.name);
-            const i = list.indexOf(infoState.it.name);
-            const next = list[i + (e.key === "ArrowRight" ? 1 : -1)];
-            if (next) openInfo(infoState.tab, data.by.get(next), true);
+            if (st.mode !== "info") setMode("info");
+            else closeInfo();
+        } else if (st.mode === "info" && (e.key === "ArrowRight" || e.key === "ArrowLeft") && !/input|textarea|select/i.test(e.target.tagName)) {
+            const d = decks[st.tab];
+            const list = (d.shown || []).map((x) => x.name);
+            const next = list[list.indexOf(st.it.name) + (e.key === "ArrowRight" ? 1 : -1)];
+            if (next) openInfo(st.tab, data.by.get(next), true);
         }
     }
-    function openInfo(tab, it, keep) {
-        closeFloating();
-        const back = keep && infoState ? infoState.back : document.activeElement;
-        const prev = document.querySelector(".ld-modal-wrap");
-        if (prev) prev.remove();
-        infoState = { tab, it, back };
-        document.addEventListener("keydown", infoKeys, true);
+    // a LoRA's card as the deck shows it, for the editor and the small card: [shape wrapper > card]
+    function cardView(it, fr, shape, size, cssSize) {
+        const p = placePic(it, fr);
+        const src = thumbUrl(it, tierFor(size * 1.6 * Math.max(1, p.w / 100)));
+        const pic = !it.preview ? `<div class="ld-nopic"><span>${esc(it._title.slice(0, 2))}</span></div>`
+            : isVideo(it) ? `<video class="ld-pic" src="${thumbUrl(it, 480)}" muted loop playsinline autoplay></video>`
+                : `<img class="ld-pic-bg" src="${src}" alt="" aria-hidden="true"${p.gaps ? "" : " hidden"}><img class="ld-pic ld-framed" src="${src}" alt="" draggable="false" style="${picStyle(p)}">`;
+        return `<div class="ld-cardview ld-${shape === "hex" ? "hex" : shape === "octa" ? "oct" : "card"}mode" style="--ld-size:${cssSize || size + "px"}">
+          <div class="ld-card loaded">
+            <div class="ld-frame" aria-hidden="true"></div>
+            <div class="ld-media">${pic}<div class="ld-shade"></div>
+              <div class="ld-cap"><div class="ld-title">${esc(it._title)}</div>${it.folder ? `<div class="ld-subt">${esc(segLabel(it.folder.split("/").pop()))}</div>` : ""}</div>
+            </div>
+          </div></div>`;
+    }
+    function infoMedia(it) {
+        const big = tierFor(560 * (window.devicePixelRatio || 1));
+        const reveal = `<button type="button" class="ld-btn ld-reveal" data-do="reveal" title="Show this preview">${ic("eye")}<span>Show</span></button>`;
+        if (isVideo(it)) return `<video class="ld-m-pic" src="${thumbUrl(it, big)}" muted loop playsinline autoplay></video>${reveal}`;
+        if (!it.preview) return `<div class="ld-nopic"><span>${esc(it._title.slice(0, 2))}</span></div>`;
+        return `<img class="ld-m-bg" src="${thumbUrl(it, 240)}" alt="" aria-hidden="true"><img class="ld-m-pic" src="${thumbUrl(it, big)}" alt="">${reveal}`;
+    }
+    function renderMedia(st) {
+        const m = st.media;
+        if (st.mode === "info") m.innerHTML = infoMedia(st.it);
+        else if (st.mode === "frame") {
+            const still = framable(fit(st));
+            // the card is as big as the stage allows (up to 290px wide)
+            m.innerHTML = `<div class="ld-stage${still ? "" : " ld-still-stage"}">
+                <div class="ld-stage-card">${still ? `<img class="ld-stage-ghost" src="${thumbUrl(fit(st), tierFor(800))}" alt="" aria-hidden="true" draggable="false">` : ""}${cardView(fit(st), st.fr, st.shape, 290, "min(290px, calc((100cqh - 130px) / 1.5), calc(100cqw - 80px))")}</div>
+                <div class="ld-stage-shapes" role="radiogroup" aria-label="See it in another card shape">
+                  ${["hex", "octa", "card"].map((s) => `<button type="button" class="ld-btn ld-icon${s === st.shape ? " on" : ""}" data-shape="${s}" role="radio" aria-checked="${s === st.shape}" title="${s === "hex" ? "Hexagon" : s === "octa" ? "Octagon" : "Rounded"}${s === prefs.shape ? " (your cards)" : ""}">${ic(s === "card" ? "rect" : s)}</button>`).join("")}
+                </div>
+                ${still ? `<div class="ld-stage-hint">${ic("move")}Drag to move · wheel to zoom</div>` : ""}
+                ${fit(st).preview ? `<button type="button" class="ld-btn ld-reveal" data-do="reveal" title="Show this preview">${ic("eye")}<span>Show</span></button>` : ""}
+              </div>`;
+            paintStage(st);
+        } else m.innerHTML = cardView(st.it, framingOf(st.it), prefs.shape, st.mode === "card" ? prefs.cardPic : 96);
+    }
+    // the editor: the card's picture where the framing puts it, and the rest of the picture faintly around it
+    function paintStage(st) {
+        const stage = st.media.querySelector(".ld-stage");
+        if (!stage) return;
+        const p = placePic(fit(st), st.fr);
+        const pic = stage.querySelector(".ld-pic.ld-framed");
+        const bg = stage.querySelector(".ld-pic-bg");
+        if (pic) pic.setAttribute("style", picStyle(p));
+        if (bg) bg.hidden = !p.gaps;
+        // from layout offsets, not screen boxes, so it's right while the dialog is still morphing
+        const card = stage.querySelector(".ld-stage-card .ld-card");
+        const media = card && card.querySelector(".ld-media");
+        const ghost = stage.querySelector(".ld-stage-ghost");
+        if (media && ghost) {
+            const x0 = card.offsetLeft + media.offsetLeft, y0 = card.offsetTop + media.offsetTop;
+            Object.assign(ghost.style, {
+                left: (x0 + (p.left / 100) * media.offsetWidth) + "px", top: (y0 + (p.top / 100) * media.offsetHeight) + "px",
+                width: (p.w / 100) * media.offsetWidth + "px", height: (p.h / 100) * media.offsetHeight + "px",
+            });
+        }
+        const panel = st.wrap.querySelector('[data-panel="frame"]');
+        if (panel) {
+            const z = panel.querySelector(".ld-zoom");
+            if (z && document.activeElement !== z) z.value = zoomToSlider(st.fr.z);
+            const out = panel.querySelector(".ld-zoom-val");
+            if (out) out.textContent = Math.round(st.fr.z * 100) + "%";
+        }
+    }
+    const ZMIN = 0.2, ZMAX = 5;
+    const zoomToSlider = (z) => Math.round((Math.log(z / ZMIN) / Math.log(ZMAX / ZMIN)) * 1000);
+    const sliderToZoom = (v) => ZMIN * Math.pow(ZMAX / ZMIN, v / 1000);
+    // zoom around a point of the frame (cx, cy in % of the frame), keeping that point of the picture under it
+    function zoomAt(st, z, cx, cy) {
+        const p = placePic(fit(st), st.fr, true);
+        const ux = (cx - p.left) / p.w, uy = (cy - p.top) / p.h;
+        const nz = clamp(z, ZMIN, ZMAX);
+        const k = nz / st.fr.z;
+        const nw = p.w * k, nh = p.h * k;
+        st.fr = { x: (50 - (cx - ux * nw)) / nw, y: (50 - (cy - uy * nh)) / nh, z: nz };
+        st.fr = clampFraming(fit(st), st.fr);
+        paintStage(st);
+    }
+    function wireStage(st) {
+        const m = st.media;
+        let drag = null;
+        m.addEventListener("pointerdown", (e) => {
+            if (st.mode !== "frame" || !framable(fit(st)) || e.button !== 0 || e.target.closest("button")) return;
+            const media = m.querySelector(".ld-stage-card .ld-media");
+            if (!media) return;
+            const r = media.getBoundingClientRect();
+            drag = { x: e.clientX, y: e.clientY, fr: { ...st.fr }, w: r.width, h: r.height };
+            m.setPointerCapture(e.pointerId);
+            m.classList.add("dragging");
+        });
+        m.addEventListener("pointermove", (e) => {
+            if (!drag) return;
+            const p = placePic(fit(st), drag.fr, true);
+            const dl = ((e.clientX - drag.x) / drag.w) * 100, dt = ((e.clientY - drag.y) / drag.h) * 100;
+            st.fr = clampFraming(fit(st), { x: drag.fr.x - dl / p.w, y: drag.fr.y - dt / p.h, z: drag.fr.z });
+            paintStage(st);
+        });
+        const end = () => {
+            drag = null;
+            m.classList.remove("dragging");
+        };
+        m.addEventListener("pointerup", end);
+        m.addEventListener("pointercancel", end);
+        m.addEventListener("wheel", (e) => {
+            if (st.mode !== "frame" || !framable(fit(st))) return;
+            const media = m.querySelector(".ld-stage-card .ld-media");
+            if (!media) return;
+            e.preventDefault();
+            const r = media.getBoundingClientRect();
+            zoomAt(st, st.fr.z * Math.exp(-e.deltaY * 0.0015), ((e.clientX - r.left) / r.width) * 100, ((e.clientY - r.top) / r.height) * 100);
+        }, { passive: false });
+    }
+
+    // --- the details dialog's size: drag its edges or corner (kept per view, for every LoRA) ----------------------
+    // The dialog stays centred, so an edge moves half as far as the size changes: the side you hold follows the mouse.
+    // In the details, the left edge (and the grip that shows to the left of the picture as the mouse comes near) makes
+    // the picture bigger or smaller instead: the dialog widens by as much, and the text beside it keeps its width.
+    const DLG_MIN = { info: [600, 420], frame: [700, 460], card: [760, 460], meta: [560, 380] };
+    const PIC_MIN = 220;
+    function applySize(st) {
+        const modal = st.wrap.querySelector(".ld-modal");
+        const s = prefs.dlg[st.mode] || {};
+        modal.style.width = s.w ? `min(${s.w}px, calc(100vw - 48px))` : "";
+        modal.style.height = s.h ? `min(${s.h}px, calc(100vh - 48px))` : "";
+        modal.style.maxHeight = s.h ? "calc(100vh - 48px)" : "";
+        modal.classList.toggle("ld-sized", !!s.h);
+        const pic = st.mode === "info" ? s.pic : 0;
+        modal.style.gridTemplateColumns = pic ? `${pic}px minmax(0, 1fr)` : "";
+        // a bigger picture asks for a taller dialog too (as tall as the picture's shape wants, up to the window)
+        st.media.style.minHeight = pic ? `min(${Math.round(pic / ratioOf(st.it))}px, calc(100vh - 48px))` : "";
+    }
+    // which edge or corner of the dialog the mouse is on ("l", "br"...), within a few pixels outside it
+    function zoneAt(st, x, y) {
+        const r = st.wrap.querySelector(".ld-modal").getBoundingClientRect();
+        const out = 12, inn = 2;
+        if (x < r.left - out || x > r.right + out || y < r.top - out || y > r.bottom + out) return null;
+        const h = x < r.left + inn ? "l" : x > r.right - inn ? "r" : "";
+        const v = y < r.top + inn ? "t" : y > r.bottom - inn ? "b" : "";
+        return v + h || null;
+    }
+    const ZONE_CURSOR = { l: "ew-resize", r: "ew-resize", t: "ns-resize", b: "ns-resize", tl: "nwse-resize", br: "nwse-resize", tr: "nesw-resize", bl: "nesw-resize" };
+    // a size change shown as a quick move from the old size (a double-click back to the usual one)
+    function morphSize(st, change) {
+        const modal = st.wrap.querySelector(".ld-modal");
+        const m0 = modal.getBoundingClientRect();
+        change();
+        applySize(st);
+        store.set("dlg", prefs.dlg);
+        if (!motionOn()) return;
+        const m1 = modal.getBoundingClientRect();
+        modal.animate([{ width: m0.width + "px", height: m0.height + "px" }, { width: m1.width + "px", height: m1.height + "px" }], { duration: 300, easing: EASE });
+    }
+    function wireResize(st) {
+        const wrap = st.wrap;
+        const modal = wrap.querySelector(".ld-modal");
+        wrap.insertAdjacentHTML("beforeend", `<div class="ld-grip ld-pgrip" title="Drag to make the picture bigger or smaller (double-click: the usual size)" aria-hidden="true"><i></i></div>
+            <div class="ld-grip ld-cgrip" title="Drag to resize (double-click: the usual size)" aria-hidden="true"></div>`);
+        const pg = wrap.querySelector(".ld-pgrip"), cg = wrap.querySelector(".ld-cgrip");
+        let drag = null, raf = 0, last = null;
+        // the grips sit just outside the dialog, and show more the nearer the mouse is
+        const paintGrips = () => {
+            raf = 0;
+            if (!last || !wrap.isConnected) return;
+            const r = modal.getBoundingClientRect();
+            const vw = window.innerWidth, vh = window.innerHeight;
+            const info = st.mode === "info";
+            pg.hidden = !info;
+            const px = Math.max(2, r.left - 26), py = clamp(r.top + r.height / 2 - 48, 2, vh - 98);
+            pg.style.transform = `translate(${px}px, ${py}px)`;
+            cg.style.transform = `translate(${Math.min(vw - 24, r.right + 2)}px, ${Math.min(vh - 24, r.bottom + 2)}px)`;
+            const near = (d) => String(drag ? 1 : clamp(1 - d / 170, 0, 1).toFixed(2));
+            const dl = Math.hypot(Math.max(0, Math.abs(last.x - (px + 14)) - 10), Math.max(0, Math.abs(last.y - (py + 48)) - 48));
+            pg.style.opacity = near(dl);
+            cg.style.opacity = near(Math.hypot(last.x - r.right, last.y - r.bottom));
+        };
+        const ask = () => { if (!raf) raf = requestAnimationFrame(paintGrips); };
+        wrap.addEventListener("pointermove", (e) => {
+            last = { x: e.clientX, y: e.clientY };
+            if (drag) return onDrag(e);
+            ask();
+            const z = e.target.closest(".ld-grip") ? null : zoneAt(st, e.clientX, e.clientY);
+            wrap.style.cursor = z ? ZONE_CURSOR[z] : "";
+        });
+        wrap.addEventListener("pointerleave", () => {
+            last = { x: -9999, y: -9999 };
+            ask();
+        });
+        const start = (e, zone) => {
+            const s = prefs.dlg[st.mode] || {};
+            // inside the border, as the width and height styles count
+            drag = { zone, x: e.clientX, y: e.clientY, w: modal.clientWidth, h: modal.clientHeight, pic: st.mode === "info" ? st.media.offsetWidth : 0, s: { ...s } };
+            try {
+                wrap.setPointerCapture(e.pointerId);
+            } catch (err) { /* the drag still follows the mouse over the dialog */ }
+            wrap.classList.add("ld-resizing");
+            wrap.style.setProperty("--ld-cursor", ZONE_CURSOR[zone === "pic" ? "l" : zone]);
+            e.preventDefault();
+        };
+        const onDrag = (e) => {
+            const { zone } = drag;
+            const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+            const [minW, minH] = DLG_MIN[st.mode] || [560, 380];
+            const maxW = window.innerWidth - 48, maxH = window.innerHeight - 48;
+            const s = { ...drag.s };
+            if (zone === "pic") {  // the picture's own grip, or the left edge of the details
+                const pic = clamp(drag.pic - 2 * dx, PIC_MIN, Math.max(PIC_MIN, maxW - (drag.w - drag.pic)));
+                s.pic = Math.round(pic);
+                s.w = Math.round(drag.w + (pic - drag.pic));
+            } else {
+                if (zone.includes("r")) s.w = Math.round(clamp(drag.w + 2 * dx, minW, maxW));
+                if (zone.includes("l")) s.w = Math.round(clamp(drag.w - 2 * dx, minW, maxW));
+                if (zone.includes("b")) s.h = Math.round(clamp(drag.h + 2 * dy, minH, maxH));
+                if (zone.includes("t")) s.h = Math.round(clamp(drag.h - 2 * dy, minH, maxH));
+                if (s.pic && s.w) s.pic = Math.min(s.pic, s.w - 420);  // the text keeps some room
+            }
+            prefs.dlg[st.mode] = s;
+            applySize(st);
+            ask();
+        };
+        const end = () => {
+            if (!drag) return;
+            drag = null;
+            wrap.classList.remove("ld-resizing");
+            store.set("dlg", prefs.dlg);
+            if (st.mode === "info") renderMedia(st);  // a sharper picture if it grew
+            if (st.mode === "frame") paintStage(st);
+            ask();
+        };
+        wrap.addEventListener("pointerup", end);
+        wrap.addEventListener("pointercancel", end);
+        // a click outside closes the dialog; on its edge (or a grip) it starts a resize instead
+        wrap.addEventListener("pointerdown", (e) => {
+            if (e.button !== 0) return;
+            if (e.target === pg || pg.contains(e.target)) return start(e, "pic");
+            if (e.target === cg) return start(e, "br");
+            const z = zoneAt(st, e.clientX, e.clientY);
+            if (z) return start(e, st.mode === "info" && z === "l" ? "pic" : z);
+            if (e.target === wrap) closeInfo();
+        });
+        pg.addEventListener("dblclick", () => morphSize(st, () => {
+            const s = { ...(prefs.dlg.info || {}) };
+            if (s.pic && s.w) s.w -= s.pic - 380;
+            delete s.pic;
+            prefs.dlg.info = s;
+        }));
+        cg.addEventListener("dblclick", () => morphSize(st, () => { delete prefs.dlg[st.mode]; }));
+    }
+
+    function setMode(mode) {
+        const st = infoState;
+        if (!st || st.mode === mode) return;
+        const modal = st.wrap.querySelector(".ld-modal");
+        const anim = motionOn();
+        const r0 = anim ? st.media.getBoundingClientRect() : null;
+        const m0 = anim ? modal.getBoundingClientRect() : null;
+        if (mode === "frame") {
+            st.pick = null;
+            st.upload = null;
+            st.fr = clampFraming(st.it, { ...framingOf(st.it) });
+            st.shape = prefs.shape;
+        }
+        st.mode = mode;
+        modal.dataset.mode = mode;
+        applySize(st);
+        const panel = ensurePanel(st, mode);
+        if (mode === "card") panel.querySelector(".ld-ce-pic").prepend(st.media);
+        else if (mode === "meta") st.wrap.querySelector(".ld-m-mini").appendChild(st.media);
+        else modal.insertBefore(st.media, modal.firstChild);
+        renderMedia(st);
+        st.wrap.querySelectorAll(".ld-m-panel").forEach((p) => { p.hidden = p !== panel; });
+        // the same ✕ everywhere: it closes the details, and from the other views it goes back to them
+        const close = st.wrap.querySelector(".ld-m-close");
+        close.title = mode === "info" ? "Close (Esc)" : "Back to the details (Esc)";
+        close.setAttribute("aria-label", mode === "info" ? "Close" : "Back to the details");
+        if (!anim) return;
+        const r1 = st.media.getBoundingClientRect(), m1 = modal.getBoundingClientRect();
+        modal.animate([{ width: m0.width + "px", height: m0.height + "px" }, { width: m1.width + "px", height: m1.height + "px" }],
+            { duration: 340, easing: EASE });
+        if (r1.width && r1.height) {
+            // from where the picture was, scaled evenly (the card keeps its shape on the way) around its centre
+            const s = Math.min(r0.width / r1.width, r0.height / r1.height);
+            const dx = r0.left + r0.width / 2 - (r1.left + r1.width / 2), dy = r0.top + r0.height / 2 - (r1.top + r1.height / 2);
+            st.media.animate([{ transform: `translate(${dx}px, ${dy}px) scale(${s})` }, { transform: "none" }], { duration: 380, easing: EASE });
+        }
+        panel.animate([{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "none" }],
+            { duration: 260, delay: 90, easing: EASE, fill: "backwards" });
+        if (mode === "frame") setTimeout(() => paintStage(st), 400);  // the ghost follows the card once it has settled
+    }
+    function ensurePanel(st, mode) {
+        let panel = st.wrap.querySelector(`[data-panel="${mode}"]`);
+        if (panel && mode === "info") return panel;
+        if (panel) panel.remove();
+        panel = el("div", "ld-m-panel");
+        panel.dataset.panel = mode;
+        st.wrap.querySelector(".ld-m-body").appendChild(panel);
+        if (mode === "frame") buildFramePanel(st, panel);
+        else if (mode === "card") buildCardPanel(st, panel);
+        else if (mode === "meta") buildMetaPanel(st, panel);
+        return panel;
+    }
+    // after a save: the new card everywhere
+    function takeItem(it) {
+        prepare(it);
+        const i = data.items.findIndex((x) => x.name === it.name);
+        if (i >= 0) data.items[i] = it;
+        else data.items.push(it);
+        data.by.set(it.name, it);
+        data.byAlias.set(it.alias, it);
+        everyDeck((d) => {
+            d.cards.delete(it.name);
+            renderAll(d);
+        });
+        if (infoState && infoState.it.name === it.name) {
+            infoState.it = it;
+            const old = infoState.wrap.querySelector('[data-panel="info"]');
+            if (old) old.replaceWith(buildInfoPanel(infoState));
+            infoState.wrap.querySelector(".ld-m-head h3").textContent = it._title;
+        }
+        return it;
+    }
+
+    // Edit preview's panel: how the picture sits (zoom, fill, whole, automatic), and which picture it is: its preview
+    // now, an upload, or one of its gens. A picture picked here is only shown until Save preview.
+    function frameNote(st) {
+        const it = fit(st);
+        if (!it.pw) return "";
+        return `${it.pw} × ${it.ph}${st.pick ? " · not saved yet" : it.preview === "gen" ? " · its first gen, not saved yet" : it.framing ? " · framed by hand" : ""}`;
+    }
+    function buildFramePanel(st, panel) {
+        const it = fit(st);
+        const still = framable(it);
+        panel.innerHTML = `
+          <div class="ld-m-scroll">
+            ${still ? `<section><h4>${ic("image")}Preview <small class="ld-frame-note">${esc(frameNote(st))}</small></h4>
+              <p class="ld-hint">Drag the picture to move it, and use the mouse wheel or the slider to zoom. The faint part
+              around the card is what the card doesn't show. The shape buttons above it only preview: your cards keep their shape.</p></section>
+            <section><h4>${ic("gridLarge")}Zoom <small class="ld-zoom-val"></small></h4>
+              <div class="ld-zoomrow"><button type="button" class="ld-btn ld-icon" data-do="zout" title="Zoom out" aria-label="Zoom out">${ic("minus")}</button>
+                <input type="range" class="ld-zoom" min="0" max="1000" step="1" aria-label="Zoom">
+                <button type="button" class="ld-btn ld-icon" data-do="zin" title="Zoom in" aria-label="Zoom in">${ic("plus")}</button></div>
+              <div class="ld-chips">
+                <button type="button" class="ld-chip" data-do="fill" title="The picture covers the whole card">Fill the card</button>
+                <button type="button" class="ld-chip" data-do="whole" title="All of the picture shows, with a soft blur around it">Whole picture</button>
+                <button type="button" class="ld-chip" data-do="reset" title="How LoRA Deck places it by itself: pictures of the card's shape fill it, others show whole">Automatic</button>
+              </div></section>`
+            : `<section><h4>${ic("image")}Preview</h4><p class="ld-hint">${it.preview ? "Its preview is a video, which always shows whole in its card. Pick one of its gens or upload a picture to take its place."
+                : "This LoRA has no preview yet. Pick one of its gens or upload a picture, then move and zoom it here."}</p></section>`}
+            <section><h4>${ic("gridSmall")}Picture <small class="ld-pics-note"></small></h4>
+              <div class="ld-pics" role="listbox" aria-label="Pictures for its card"></div>
+              <button type="button" class="ld-btn ld-link ld-pics-more" data-do="moregens" hidden></button>
+              <p class="ld-hint ld-pics-from"></p>
+              <input type="file" class="ld-file" accept="image/png,image/jpeg,image/webp,image/avif,image/gif" hidden></section>
+          </div>
+          <div class="ld-m-foot"><button type="button" class="ld-btn ld-pill" data-do="back" title="Leave it as it was">${ic("x")}<span>Cancel</span></button><span class="ld-grow"></span>
+            ${still ? `<button type="button" class="ld-btn ld-pill ld-main ld-primary" data-do="saveframe">${ic("check")}<span>Save preview</span></button>` : ""}</div>`;
+        const zoom = panel.querySelector(".ld-zoom");
+        if (zoom) zoom.addEventListener("input", (e) => zoomAt(st, sliderToZoom(Number(e.target.value)), 50, 50));
+        panel.querySelector(".ld-file").addEventListener("change", (e) => {
+            const f = e.target.files && e.target.files[0];
+            e.target.value = "";
+            if (!f) return;
+            if (f.size > 60 * 1024 * 1024) return toast("That picture is too big (60 MB at most)");
+            const url = URL.createObjectURL(f);
+            const im = new Image();
+            im.onload = () => {
+                if (st.upload) URL.revokeObjectURL(st.upload.it._src);
+                st.upload = { kind: "data", file: f, it: { ...st.it, preview: "still", gen: null, pw: im.naturalWidth, ph: im.naturalHeight, framing: null, _src: url } };
+                pickPicture(st, st.upload);
+            };
+            im.onerror = () => {
+                URL.revokeObjectURL(url);
+                toast("That file isn't a picture this browser can show");
+            };
+            im.src = url;
+        });
+        paintPics(st, panel);
+        if (!st.gens) loadGens(st, 0);
+        setTimeout(() => paintStage(st));
+    }
+    // the pictures to pick from: its preview now, an upload, then its gens (newest first)
+    function paintPics(st, panel) {
+        const box = panel.querySelector(".ld-pics");
+        if (!box) return;
+        const it = st.it;
+        const g = st.gens;
+        const sel = !st.pick ? "now" : st.pick.kind === "gen" ? "g:" + st.pick.id : "up";
+        const img = (src) => `<img src="${esc(src)}" alt="" loading="lazy" decoding="async" draggable="false">`;
+        const tile = (key, inner, title, label) => `<button type="button" class="ld-btn ld-pt${key === sel ? " on" : ""}" data-pick="${esc(key)}" role="option"
+            aria-selected="${key === sel}" title="${esc(title)}">${inner}${label ? `<span class="ld-pt-label">${esc(label)}</span>` : ""}</button>`;
+        const shownGen = it.preview === "gen" ? it.gen.id : "";
+        let html = "";
+        if (it.preview) {
+            html += tile("now", isVideo(it) ? `<span class="ld-pt-icon">${ic("image")}</span>` : img(thumbUrl(it, 160)),
+                shownGen ? `Its first gen (${it.gen.file}), shown because it has no preview` : "Its preview now", shownGen ? "First gen" : "Now");
+        }
+        if (st.upload) html += tile("up", img(st.upload.it._src), st.upload.file.name, st.upload.label || "Upload");
+        const gal = galleryPic(st.tab);
+        if (gal && !(st.upload && st.upload.from === gal)) {
+            html += `<button type="button" class="ld-btn ld-pt" data-do="gallery" title="The picture shown in the WebUI's gallery now">${img(gal)}<span class="ld-pt-label">Gallery</span></button>`;
+        }
+        html += `<button type="button" class="ld-btn ld-pt ld-pt-add" data-do="upload" title="Upload a picture from this computer">${ic("plus")}<span class="ld-pt-label">Upload</span></button>`;
+        if (!g || (g.loading && !g.items.length)) html += `<span class="ld-pt ld-pt-wait" aria-hidden="true"></span>`.repeat(4);
+        else {
+            html += g.items.filter((x) => x.id !== shownGen).map((x) => tile("g:" + x.id, img(genThumb(x, 160)),
+                `${x.file} · ${new Date(x.t * 1000).toLocaleString()}${x.w ? ` · ${x.w} × ${x.h}` : ""}`, "")).join("");
+        }
+        const top = box.scrollTop;
+        box.innerHTML = html;
+        box.scrollTop = top;
+        const note = panel.querySelector(".ld-pics-note");
+        const more = panel.querySelector(".ld-pics-more");
+        const from = panel.querySelector(".ld-pics-from");
+        const dirs = (g && g.dirs) || data.genDirs || [];
+        const names = dirs.map((d) => d.split(/[\\/]/).filter(Boolean).pop()).join(", ");
+        note.textContent = !g || (g.loading && !g.items.length) ? "looking through your gens…"
+            : g.error ? `couldn't read your gens (${g.error})`
+                : g.total ? `${g.total} gen${g.total === 1 ? "" : "s"} made with it, newest first` : "no gens made with it yet";
+        more.hidden = !g || g.items.length >= g.total;
+        if (g && !more.hidden) more.textContent = g.loading ? "Loading…" : `Show more (${g.total - g.items.length} left)`;
+        from.textContent = `${names ? `Gens from ${names} (the WebUI's output folders, in Settings › Paths for saving). ` : ""}Saving copies the picture you pick as its preview${it.preview && it.preview !== "gen" ? "; the old one goes to LoRA Deck's backups" : ""}.`;
+    }
+    function loadGens(st, offset) {
+        const g = st.gens || (st.gens = { items: [], total: 0, dirs: [], loading: false, error: "" });
+        if (g.loading) return;
+        g.loading = true;
+        const name = st.it.name;
+        const repaint = () => {
+            const panel = st.wrap.querySelector('[data-panel="frame"]');
+            if (panel && st.mode === "frame") paintPics(st, panel);
+        };
+        if (offset) repaint();
+        api(`gens?name=${encodeURIComponent(name)}&offset=${offset}&limit=60`).then((r) => {
+            g.items = offset ? g.items.concat(r.items || []) : r.items || [];
+            g.total = r.total || 0;
+            g.dirs = r.dirs || [];
+            g.error = "";
+        }, (e) => { g.error = e.message; }).finally(() => {
+            g.loading = false;
+            if (infoState === st && st.it.name === name) repaint();
+        });
+    }
+    // show another picture in the editor (not saved until Save preview), placed the automatic way
+    function pickPicture(st, pick) {
+        const before = framable(fit(st));
+        st.pick = pick;
+        st.fr = clampFraming(fit(st), { ...framingOf(fit(st)) });
+        renderMedia(st);
+        const panel = st.wrap.querySelector('[data-panel="frame"]');
+        if (!panel) return;
+        if (framable(fit(st)) !== before) {  // the zoom controls come (or go): the panel anew, where it was scrolled to
+            const sc = panel.querySelector(".ld-m-scroll"), pics = panel.querySelector(".ld-pics");
+            const a = sc ? sc.scrollTop : 0, b = pics ? pics.scrollTop : 0;
+            buildFramePanel(st, panel);
+            panel.querySelector(".ld-m-scroll").scrollTop = a;
+            panel.querySelector(".ld-pics").scrollTop = b;
+        } else {
+            paintPics(st, panel);
+            const n = panel.querySelector(".ld-frame-note");
+            if (n) n.textContent = frameNote(st);
+        }
+        paintStage(st);
+    }
+    // the picture the WebUI's gallery shows (the one picked there, else the first)
+    function galleryPic(tab) {
+        const g = app().querySelector(`#${tab}_gallery`);
+        if (!g) return null;
+        const im = g.querySelector(".preview img") || g.querySelector(".thumbnail-item.selected img") || g.querySelector(".thumbnail-item img, img");
+        return im && im.src && !/\.(mp4|webm)(\?|$)/i.test(im.src) ? im.src : null;
+    }
+    // a picture from a URL (the gallery's) taken in as if uploaded
+    function pickFromUrl(st, src, label) {
+        fetch(src).then((r) => {
+            if (!r.ok) throw new Error(`the WebUI answered ${r.status}`);
+            return r.blob();
+        }).then((blob) => {
+            const f = new File([blob], `${label.toLowerCase()}.${(blob.type.split("/")[1] || "png").replace("jpeg", "jpg")}`, { type: blob.type || "image/png" });
+            const url = URL.createObjectURL(f);
+            const im = new Image();
+            im.onload = () => {
+                if (st.upload) URL.revokeObjectURL(st.upload.it._src);
+                st.upload = { kind: "data", file: f, label, from: src, it: { ...st.it, preview: "still", gen: null, pw: im.naturalWidth, ph: im.naturalHeight, framing: null, _src: url } };
+                pickPicture(st, st.upload);
+            };
+            im.src = url;
+        }).catch((e) => toast(`Couldn't take the gallery's picture: ${e.message}`));
+    }
+    const readData = (file) => new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = () => rej(new Error("the file couldn't be read"));
+        r.readAsDataURL(file);
+    });
+
+    // Edit card: the WebUI's card editor and more. Its texts on the left; on the right the card (256px wide at first,
+    // like the WebUI's, and as big as you drag its corner, for every LoRA) with the file's facts under it.
+    const TAG_HUES = ["#f97316", "#f59e0b", "#84cc16", "#10b981", "#06b6d4", "#3b82f6", "#8b5cf6", "#ec4899"];
+    const hueFor = (n, max) => {
+        const r = n / (max || 1);
+        return TAG_HUES[r >= 0.8 ? 0 : r >= 0.6 ? 1 : r >= 0.45 ? 2 : r >= 0.3 ? 3 : r >= 0.2 ? 4 : r >= 0.12 ? 5 : r >= 0.06 ? 6 : 7];
+    };
+    // the tags of its captions, most used first (as the WebUI counts them)
+    function trainedTags(st) {
+        const m = st.meta;
+        const freq = m && m.ss_tag_frequency && typeof m.ss_tag_frequency === "object" ? m.ss_tag_frequency : null;
+        if (!freq) return (st.it.tags || []).map(([t, n]) => [t, Number(n)]);
+        const tags = {};
+        for (const set of Object.values(freq)) for (const [t, n] of Object.entries(set || {})) tags[t.trim()] = (tags[t.trim()] || 0) + Number(n || 0);
+        return Object.entries(tags).filter(([t]) => t).sort((a, b) => b[1] - a[1]);
+    }
+    // the WebUI's random prompt: each tag with a chance of its count over the top tag's
+    function randomPrompt(tags) {
+        const max = tags.length ? tags[0][1] : 0;
+        return tags.filter(([, n]) => n > Math.random() * max).map(([t]) => t.replace(/([({[\]})])/g, "\\$1")).sort().join(", ");
+    }
+    const splitTags = (line) => line.split(/\s*,\s*/).map((x) => x.trim());
+    const hasTag = (text, tag) => text.split(/\n|\|\|/).some((part) => splitTags(part).includes(tag));
+    // a tag in or out of the activation text: out wherever it is; in at the end of the last line without choices
+    function toggleTag(text, tag) {
+        if (hasTag(text, tag)) {  // only the lines that have it change; one left empty goes
+            const out = [];
+            for (const line of text.split("\n")) {
+                if (!line.split("||").some((part) => splitTags(part).includes(tag))) {
+                    out.push(line);
+                    continue;
+                }
+                const next = line.split(/(\s*\|\|\s*)/).map((part, i) => {
+                    if (i % 2) return part;
+                    const kept = splitTags(part).filter((x) => x && x !== tag);
+                    return kept.join(", ") + (kept.length && /,\s*$/.test(part) ? "," : "");
+                }).join("");
+                if (next.replace(/\|\|/g, "").trim()) out.push(next);
+            }
+            return out.join("\n");
+        }
+        const lines = text.split("\n");
+        let at = -1;
+        for (let i = lines.length - 1; i >= 0; i--) if (!lines[i].includes("||") && lines[i].trim()) { at = i; break; }
+        if (at < 0) return text.trim() ? `${text.replace(/\s+$/, "")}\n${tag},` : `${tag},`;
+        lines[at] = /,\s*$/.test(lines[at]) ? `${lines[at].replace(/\s+$/, "")} ${tag},` : `${lines[at].replace(/\s+$/, "")}, ${tag},`;
+        return lines.join("\n");
+    }
+    function buildCardPanel(st, panel) {
+        const it = st.it;
+        const versions = (data.meta.sd_versions || ["Unknown"]);
+        panel.innerHTML = `<div class="ld-m-scroll"><div class="ld-cardedit">
+            <form class="ld-form ld-ce-main" autocomplete="off">
+              <label class="ld-field"><span>Description <small>shown under its name in the WebUI's own tab</small></span><textarea name="description" rows="2"></textarea></label>
+              <section class="ld-ce-tags" hidden><h4>${ic("code")}Training tags <small>the most used in its captions; a click puts one in the activation text, or takes it out</small></h4>
+                <div class="ld-tagcloud"></div></section>
+              <label class="ld-field"><span>Activation text <small>what a click adds to the prompt; <code>||</code> separates choices on one line</small></span>
+                <textarea name="activation text" rows="6" class="ld-monofield"></textarea><span class="ld-field-note" data-note="choices"></span></label>
+              <div class="ld-field-row">
+                <label class="ld-field"><span>Preferred weight <small>0: the WebUI's default</small></span>
+                  <span class="ld-weightrow"><input type="range" class="ld-wslider" min="0" max="2" step="0.05" aria-label="Preferred weight"><input type="number" name="preferred weight" step="0.05" min="-4" max="4"></span></label>
+                <label class="ld-field"><span>Model version</span><select name="sd version">${versions.map((v) => `<option>${esc(v)}</option>`).join("")}</select></label>
+              </div>
+              <label class="ld-field"><span>Negative text <small>goes in the negative prompt with it</small></span><textarea name="negative text" rows="2" class="ld-monofield"></textarea></label>
+              <section class="ld-ce-random" hidden><h4>${ic("spark")}Random prompt <small>its training tags, each picked by how often it was trained on</small></h4>
+                <div class="ld-random"><textarea class="ld-monofield" rows="3" readonly aria-label="Random prompt"></textarea>
+                  <div class="ld-random-btns"><button type="button" class="ld-btn ld-pill ld-sm" data-do="rnd">${ic("refresh")}<span>Generate</span></button>
+                    <button type="button" class="ld-btn ld-pill ld-sm" data-do="rndcopy">${ic("copy")}<span>Copy</span></button>
+                    <button type="button" class="ld-btn ld-pill ld-sm" data-do="rndadd">${ic("plus")}<span>Add to prompt</span></button></div></div></section>
+              <label class="ld-field"><span>Notes</span><textarea name="notes" rows="4"></textarea></label>
+            </form>
+            <aside class="ld-ce-side">
+              <div class="ld-ce-pic"><span class="ld-ce-grip" title="Drag to make the preview bigger or smaller (for every LoRA)" aria-hidden="true"></span></div>
+              <table class="ld-ce-file"></table>
+            </aside>
+          </div></div>
+          <div class="ld-m-foot"><button type="button" class="ld-btn ld-pill" data-do="back" title="Leave it as it was">${ic("x")}<span>Cancel</span></button><span class="ld-grow"></span>
+            <button type="button" class="ld-btn ld-pill ld-main ld-primary" data-do="savecard" disabled>${ic("check")}<span>Save card</span></button></div>`;
+        const form = panel.querySelector("form");
+        const act = form.elements["activation text"];
+        const note = panel.querySelector('[data-note="choices"]');
+        const paintNote = () => {
+            const ch = parseChoices(act.value);
+            note.innerHTML = ch ? `${ic("list")}${ch.options.length} choices: ${ch.options.map((o) => `<b>${esc(o.split(",")[0])}</b>`).join(" · ")}${ch.shared ? ` · always: ${esc(ch.shared)}` : ""}` : "";
+            panel.querySelectorAll(".ld-tag").forEach((b) => b.classList.toggle("on", hasTag(act.value, b.dataset.tag)));
+        };
+        const slider = panel.querySelector(".ld-wslider"), weight = form.elements["preferred weight"];
+        slider.addEventListener("input", () => { weight.value = slider.value; });
+        weight.addEventListener("input", () => { slider.value = weight.value; });
+        form.addEventListener("input", paintNote);
+        form.addEventListener("submit", (e) => e.preventDefault());
+        panel.querySelector(".ld-tagcloud").addEventListener("click", (e) => {
+            const b = e.target.closest(".ld-tag");
+            if (!b) return;
+            act.value = toggleTag(act.value, b.dataset.tag);
+            paintNote();
+            pop(b);
+        });
+        wireCardGrip(st, panel);
+        paintCardSide(st, panel);
+        api(`card?name=${encodeURIComponent(it.name)}`).then((card) => {
+            for (const [k, v] of Object.entries(card)) {
+                const f = form.elements[k];
+                if (!f) continue;
+                if (f.tagName === "SELECT" && v && ![...f.options].some((o) => o.value === v)) f.add(new Option(v));
+                f.value = k === "sd version" ? (v || "Unknown") : v ?? "";
+            }
+            slider.value = weight.value;
+            paintNote();
+            panel.querySelector('[data-do="savecard"]').disabled = false;
+            act.focus();
+        }, (err) => toast(`Could not read the card: ${err.message}`));
+        // the file's own facts, its full tag counts (the list has its top 40)
+        const fill = () => {
+            paintCardSide(st, panel);
+            paintNote();
+        };
+        if (st.meta) fill();
+        else api(`metadata?name=${encodeURIComponent(it.name)}`).then(({ metadata }) => {
+            st.meta = metadata || {};
+            if (panel.isConnected) fill();
+        }, () => {});
+    }
+    // the colourful tags, the random prompt and the file table (again once the metadata is in)
+    function paintCardSide(st, panel) {
+        const it = st.it;
+        const tags = trainedTags(st);
+        const top = tags.slice(0, 24);
+        const max = top.length ? top[0][1] : 1;
+        const cloud = panel.querySelector(".ld-tagcloud");
+        cloud.innerHTML = top.map(([t, n]) => `<button type="button" class="ld-btn ld-tag" data-tag="${esc(t)}" style="--c:${hueFor(n, max)}"
+            title="${esc(t)}: in ${n} caption${n === 1 ? "" : "s"}. Click to add it to the activation text, or take it out">${ic("check")}<span>${esc(t)}</span><small>${n}</small></button>`).join("");
+        panel.querySelector(".ld-ce-tags").hidden = !top.length;
+        const rnd = panel.querySelector(".ld-ce-random");
+        rnd.hidden = !tags.length;
+        const box = rnd.querySelector("textarea");
+        if (tags.length && (!box.value || st.meta)) box.value = randomPrompt(tags);
+        const m = st.meta || {};
+        const g = (k) => (m[k] == null || m[k] === "" || m[k] === "None" ? null : m[k]);
+        let res = null;
+        const buckets = g("ss_bucket_info") && m.ss_bucket_info.buckets;
+        if (buckets && typeof buckets === "object") {
+            const count = {};
+            for (const b of Object.values(buckets)) {
+                const r = b && b.resolution;
+                if (r) count[`${r[1]}×${r[0]}`] = (count[`${r[1]}×${r[0]}`] || 0) + Number(b.count || 0);
+            }
+            const list = Object.keys(count).sort((a, b) => count[b] - count[a]);
+            res = list.slice(0, 4).join(", ") + (list.length > 4 ? ", …" : "");
+        }
+        const dirs = g("ss_dataset_dirs") && typeof m.ss_dataset_dirs === "object" ? Object.values(m.ss_dataset_dirs) : [];
+        const images = dirs.reduce((a, v) => a + Number((v && v.img_count) || 0), 0);
+        const started = Number(g("ss_training_started_at")) || 0;
+        const rows = [
+            ["File", it.file], ["Size", it.size ? (it.size / 1048576).toFixed(1) + " MB" : ""], ["Hash", it.hash],
+            ["Modified", it.mtime ? new Date(it.mtime * 1000).toLocaleString() : ""],
+            ["Output name", g("ss_output_name")], ["Model", g("ss_sd_model_name") || g("modelspec.architecture")], ["Clip skip", g("ss_clip_skip")],
+            ["Module", g("ss_network_module") && String(m.ss_network_module).replace(/^.*\./, "")],
+            ["Trained", started ? new Date(started * 1000).toLocaleString() : ""], [res && res.includes(",") ? "Resolutions" : "Resolution", res],
+            ["Dataset", images ? `${images} images` : ""],
+        ].filter(([, v]) => v != null && v !== "");
+        panel.querySelector(".ld-ce-file").innerHTML = rows.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join("");
+    }
+    // the preview's corner: drag it out or in; the size is kept for every LoRA
+    const CARDPIC_MIN = 140, CARDPIC_MAX = 520;
+    function wireCardGrip(st, panel) {
+        const grip = panel.querySelector(".ld-ce-grip");
+        let drag = null;
+        grip.addEventListener("pointerdown", (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+                grip.setPointerCapture(e.pointerId);
+            } catch (err) { /* some pens: the drag still follows the grip */ }
+            drag = { x: e.clientX, y: e.clientY, w: prefs.cardPic };
+            panel.classList.add("ld-sizing");
+        });
+        grip.addEventListener("pointermove", (e) => {
+            if (!drag) return;
+            // the card grows from its top right: the corner moves left 1 and down 1.5 for each pixel of width
+            const a = (-(e.clientX - drag.x) + (e.clientY - drag.y) * 1.5) / 3.25;
+            const max = Math.min(CARDPIC_MAX, Math.max(CARDPIC_MIN, panel.clientWidth - 360));
+            setCardPic(st, clamp(Math.round(drag.w + a), CARDPIC_MIN, max));
+        });
+        const end = () => {
+            if (!drag) return;
+            drag = null;
+            panel.classList.remove("ld-sizing");
+            savePref("cardPic", prefs.cardPic);
+            if (st.mode === "card") renderMedia(st);  // a sharper picture for a bigger card
+        };
+        grip.addEventListener("pointerup", end);
+        grip.addEventListener("pointercancel", end);
+        grip.addEventListener("dblclick", () => {
+            setCardPic(st, 256);
+            savePref("cardPic", 256);
+            renderMedia(st);
+        });
+    }
+    function setCardPic(st, px) {
+        prefs.cardPic = px;
+        const v = st.media.querySelector(".ld-cardview");
+        if (v) v.style.setProperty("--ld-size", px + "px");
+    }
+
+    function buildMetaPanel(st, panel) {
+        panel.innerHTML = `<div class="ld-m-scroll ld-meta"><p class="ld-hint">Reading the file…</p></div>
+          <div class="ld-m-foot"><span class="ld-m-foot-note">${ic("info")}Read from the file; nothing here changes it</span><span class="ld-grow"></span>
+            <button type="button" class="ld-btn ld-pill" data-do="copymeta" disabled>${ic("copy")}<span>Copy all</span></button></div>`;
+        api(`metadata?name=${encodeURIComponent(st.it.name)}`).then(({ metadata }) => {
+            st.meta = metadata || {};
+            renderMeta(panel.querySelector(".ld-meta"), st.meta);
+            panel.querySelector('[data-do="copymeta"]').disabled = !Object.keys(st.meta).length;
+        }, (err) => {
+            panel.querySelector(".ld-meta").innerHTML = `<p class="ld-hint">Could not read it: ${esc(err.message)}</p>`;
+        });
+    }
+    function renderMeta(box, m) {
+        const keys = Object.keys(m);
+        if (!keys.length) {
+            box.innerHTML = `<div class="ld-empty-art">${ic("code")}</div><p class="ld-hint">This file says nothing about its training (it has no metadata).</p>`;
+            return;
+        }
+        const g = (...names) => names.map((n) => m[n]).find((v) => v !== undefined && v !== null && v !== "" && v !== "None");
+        const num = (v) => (v === undefined ? undefined : Number(v));
+        const date = (v) => (v ? new Date(Number(v) * 1000).toLocaleString() : undefined);
+        const started = num(g("ss_training_started_at")), ended = num(g("ss_training_finished_at"));
+        const dur = started && ended && ended > started ? ended - started : 0;
+        const short = (v) => String(v).replace(/^.*\./, "").replace(/'>?$/, "");
+        const facts = [
+            ["Base model", g("modelspec.architecture", "ss_base_model_version", "ss_sd_model_name")],
+            ["Network", [g("ss_network_module") && short(g("ss_network_module")), g("ss_network_dim") && `dim ${g("ss_network_dim")}`, g("ss_network_alpha") && `alpha ${g("ss_network_alpha")}`].filter(Boolean).join(" · ")],
+            ["Resolution", g("modelspec.resolution", "ss_resolution")],
+            ["Epochs", g("ss_num_epochs")], ["Steps", g("ss_steps", "ss_max_train_steps")],
+            ["Images", g("ss_num_train_images")], ["Batch size", g("ss_batch_size_per_device", "ss_total_batch_size")],
+            ["Learning rate", [g("ss_learning_rate"), g("ss_unet_lr") && `unet ${g("ss_unet_lr")}`, g("ss_text_encoder_lr") && `text ${g("ss_text_encoder_lr")}`].filter(Boolean).join(" · ")],
+            ["Optimizer", g("ss_optimizer") && short(String(g("ss_optimizer")).split("(")[0])], ["Scheduler", g("ss_lr_scheduler")],
+            ["Precision", g("ss_mixed_precision")], ["Seed", g("ss_seed")], ["Clip skip", g("ss_clip_skip")],
+            ["Trained", started ? `${date(started)}${dur ? ` · ${dur >= 3600 ? Math.floor(dur / 3600) + " h " : ""}${Math.round((dur % 3600) / 60)} min` : ""}` : undefined],
+            ["Output name", g("ss_output_name", "modelspec.title")],
+        ].filter(([, v]) => v !== undefined && v !== "" && v !== null);
+        // the tags it was trained on, summed over its folders
+        const freq = m.ss_tag_frequency && typeof m.ss_tag_frequency === "object" ? m.ss_tag_frequency : null;
+        const tags = {};
+        if (freq) for (const set of Object.values(freq)) for (const [t, n] of Object.entries(set || {})) tags[t.trim()] = (tags[t.trim()] || 0) + Number(n || 0);
+        const top = Object.entries(tags).sort((a, b) => b[1] - a[1]).slice(0, 40);
+        const max = top.length ? top[0][1] : 1;
+        const dirs = m.ss_dataset_dirs && typeof m.ss_dataset_dirs === "object" ? Object.entries(m.ss_dataset_dirs) : [];
+        const val = (v) => (typeof v === "object" ? JSON.stringify(v) : String(v));
+        box.innerHTML = `
+          <div class="ld-meta-grid">${facts.map(([k, v]) => `<div class="ld-meta-fact"><small>${esc(k)}</small><b title="${esc(v)}">${esc(v)}</b></div>`).join("")}</div>
+          ${dirs.length ? `<section><h4>${ic("folder")}Dataset <small>${dirs.length} folder${dirs.length === 1 ? "" : "s"}</small></h4>
+            <div class="ld-meta-dirs">${dirs.map(([n, v]) => `<div><span>${esc(n)}</span><small>${esc(v && v.img_count != null ? `${v.img_count} images × ${v.n_repeats || 1}` : val(v))}</small></div>`).join("")}</div></section>` : ""}
+          ${top.length ? `<section><h4>${ic("code")}Trained on <small>how many captions had each tag; click to add it</small></h4>
+            <div class="ld-bars">${top.map(([t, n]) => `<button type="button" class="ld-bar" data-words="${esc(t)}" title="Add “${esc(t)}” to the prompt"><span class="ld-bar-fill" style="width:${((n / max) * 100).toFixed(1)}%"></span><span class="ld-bar-name">${esc(t)}</span><span class="ld-bar-n">${n}</span></button>`).join("")}</div></section>` : ""}
+          <section><h4>${ic("list")}Every field <small>${keys.length}</small></h4>
+            <label class="ld-search ld-meta-find">${ic("search")}<input type="search" placeholder="Find a field or value" aria-label="Find a field"></label>
+            <dl class="ld-meta-all">${keys.sort().map((k) => `<div class="ld-meta-row"><dt>${esc(k)}</dt><dd>${esc(val(m[k]).slice(0, 600))}${val(m[k]).length > 600 ? "…" : ""}</dd></div>`).join("")}</dl></section>`;
+        const find = box.querySelector(".ld-meta-find input");
+        find.addEventListener("input", () => {
+            const q = find.value.trim().toLowerCase();
+            box.querySelectorAll(".ld-meta-row").forEach((r) => { r.hidden = !!q && !r.textContent.toLowerCase().includes(q); });
+        });
+    }
+
+    function buildInfoPanel(st) {
+        const { it } = st;
         const ch = it._choices;
-        const big = WIDTHS.find((w) => w >= 520 * (window.devicePixelRatio || 1)) || 960;
-        const media = isVideo(it)
-            ? `<video src="${thumbUrl(it, big)}" muted loop playsinline autoplay></video>`
-            : it.preview ? `<img src="${thumbUrl(it, big)}" alt="">` : `<div class="ld-nopic"><span>${esc(it._title.slice(0, 2))}</span></div>`;
-        const chips = (list, cls, line) => list.map(([t, n]) => `<button type="button" class="ld-chip ${cls || ""}" data-words="${esc(t)}" data-line="${line}" title="Add “${esc(t)}” to the prompt${prefs.lines ? ` (line ${line + 1})` : ""}">${esc(t)}${n ? `<small>${n}</small>` : ""}</button>`).join("");
+        const panel = el("div", "ld-m-panel");
+        panel.dataset.panel = "info";
+        const chips = (list, cls) => list.map(([t, n]) => `<button type="button" class="ld-chip ${cls || ""}" data-words="${esc(t)}" title="Add “${esc(t)}” to the prompt">${esc(t)}${n ? `<small>${n}</small>` : ""}</button>`).join("");
         const facts = [
             ["File", it.file], ["Folder", it.folder || "models/Lora"], ["Base model", it.base_model], ["SD version", it.sd_version && it.sd_version !== "Unknown" ? it.sd_version : ""],
+            ["Preview", it.preview === "gen" ? `its first gen, ${it.gen.file} (${new Date(it.gen.t * 1000).toLocaleDateString()}), shown until it has a preview of its own`
+                : it.pw ? `${it.pw} × ${it.ph}${it.framing ? " · framed by hand" : ""}` : ""],
             ["Modified", it.mtime ? new Date(it.mtime * 1000).toLocaleString() : ""], ["Size", it.size ? (it.size / 1048576).toFixed(1) + " MB" : ""], ["Hash", it.hash],
         ].filter(([, v]) => v);
-        const wrap = el("div", "ld-modal-wrap" + (prefs.blur ? " ld-blur" : ""));
-        wrap.innerHTML = `
-          <div class="ld-modal" role="dialog" aria-modal="true" aria-label="${esc(it._title)}">
-            <div class="ld-m-media">${media}<button type="button" class="ld-btn ld-reveal" title="Show this preview">${ic("eye")}<span>Show</span></button></div>
-            <div class="ld-m-body">
-              <div class="ld-m-head">
-                <div><h3>${esc(it._title)}</h3><div class="ld-m-path">${it._tag ? `<span class="ld-badge">${esc(it._tag)}</span>` : ""}${esc(it.folder || "models/Lora")}</div></div>
-                <button type="button" class="ld-btn ld-icon ld-m-close" title="Close (Esc)" aria-label="Close">${ic("x")}</button>
-              </div>
+        panel.innerHTML = `
               <div class="ld-m-scroll">
                 <div class="ld-m-tag"><code>&lt;lora:${esc(it.alias)}:${esc(fmtW(weightOf(it)))}&gt;</code>
                   <button type="button" class="ld-btn ld-pill ld-sm" data-do="copytag">${ic("copy")}<span>Copy</span></button>
@@ -1527,87 +2543,197 @@
                 ${it.activation ? `<section><h4>${ic("lines")}Activation text <button type="button" class="ld-btn ld-link" data-do="copyact">Copy</button></h4><pre class="ld-pre">${esc(it.activation)}</pre></section>` : ""}
                 ${it.negative ? `<section><h4>${ic("minus")}Negative text <small>goes in the negative prompt with it</small></h4><pre class="ld-pre">${esc(it.negative)}</pre></section>` : ""}
                 ${it.notes ? `<section><h4>${ic("info")}Notes</h4><p class="ld-notes">${esc(it.notes)}</p></section>` : ""}
-                ${(it.trained_words || []).length ? `<section><h4>${ic("star")}Trigger words <small>from Civitai; click to add</small></h4><div class="ld-chips">${chips(it.trained_words.map((t) => [t]), "", LINE_ACT)}</div></section>` : ""}
-                ${(it.tags || []).length ? `<section><h4>${ic("code")}Trained on <small>how often each tag was in its captions; click to add</small></h4><div class="ld-chips">${chips(it.tags.slice(0, 40), "ld-soft", LINE_LOOKS)}</div></section>` : ""}
+                ${(it.trained_words || []).length ? `<section><h4>${ic("star")}Trigger words <small>from Civitai; click to add</small></h4><div class="ld-chips">${chips(it.trained_words.map((t) => [t]), "")}</div></section>` : ""}
+                ${(it.tags || []).length ? `<section><h4>${ic("code")}Trained on <small>how often each tag was in its captions; click to add</small></h4><div class="ld-chips">${chips(it.tags.slice(0, 40), "ld-soft")}</div></section>` : ""}
                 ${it.description && !it.description.startsWith(it._title + " (") ? `<section><h4>${ic("info")}Description</h4><p class="ld-notes">${esc(it.description)}</p></section>` : ""}
                 ${!it.activation && !(it.trained_words || []).length && !(it.tags || []).length ? `<p class="ld-hint">This LoRA has no suggested prompts (no activation text, trigger words or training tags). <b>Edit card</b> can give it activation text.</p>` : ""}
                 <dl class="ld-facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
               </div>
               <div class="ld-m-foot">
+                <div class="ld-m-tools" role="group" aria-label="This LoRA">
+                  <button type="button" class="ld-btn ld-tool" data-do="frame" title="${framable(it) ? "Move and zoom the picture in its card, or pick another: one of its gens, or an upload" : "Pick one of its gens or upload a picture for its card"}">${ic("image")}<span>Edit preview</span></button>
+                  <button type="button" class="ld-btn ld-tool" data-do="card" title="Description, activation and negative text, weight, notes">${ic("edit")}<span>Edit card</span></button>
+                  <button type="button" class="ld-btn ld-tool" data-do="meta" title="What the .safetensors file says about its training">${ic("code")}<span>Metadata</span></button>
+                  <button type="button" class="ld-btn ld-tool" data-do="explore" title="Show the file in ${REVEAL_IN}">${ic("folder")}<span>Show in ${REVEAL_IN}</span></button>
+                </div>
                 <button type="button" class="ld-btn ld-icon ld-favbig" data-do="fav" aria-label="Favourite">${ic("star")}</button>
-                <button type="button" class="ld-btn ld-pill" data-do="edit" title="The WebUI's card editor: description, activation and negative text, weight, notes">${ic("edit")}<span>Edit card</span></button>
-                <button type="button" class="ld-btn ld-pill" data-do="meta" title="What the .safetensors file says about its training">${ic("code")}<span>Metadata</span></button>
-                <button type="button" class="ld-btn ld-pill" data-do="copypath" title="${esc(it.path)}">${ic("copy")}<span>Path</span></button>
+                <button type="button" class="ld-btn ld-icon ld-favbig" data-do="copypath" title="Copy the path: ${esc(it.path)}" aria-label="Copy the path">${ic("copy")}</button>
                 <span class="ld-grow"></span>
                 <button type="button" class="ld-btn ld-pill ld-main" data-do="toggle"></button>
+              </div>`;
+        panel.querySelectorAll(".ld-m-scroll > *").forEach((s, i) => s.style.setProperty("--i", Math.min(i, 8)));
+        setTimeout(() => {
+            paintInfoState();
+            paintInfoFav();
+        });
+        return panel;
+    }
+
+    function openInfo(tab, it, keep) {
+        closeFloating();
+        const back = keep && infoState ? infoState.back : document.activeElement;
+        const prev = document.querySelector(".ld-modal-wrap");
+        if (prev) prev.remove();
+        const wrap = el("div", "ld-modal-wrap" + (prefs.blur ? " ld-blur" : ""));
+        wrap.innerHTML = `
+          <div class="ld-modal" role="dialog" aria-modal="true" aria-label="${esc(it._title)}" data-mode="info">
+            <div class="ld-m-media"></div>
+            <div class="ld-m-body">
+              <div class="ld-m-head">
+                <div class="ld-m-titles"><h3>${esc(it._title)}</h3><div class="ld-m-path">${it._tag ? `<span class="ld-badge">${esc(it._tag)}</span>` : ""}${esc(it.folder || "models/Lora")}</div></div>
+                <div class="ld-m-mini"></div>
+                <button type="button" class="ld-btn ld-icon ld-m-close" title="Close (Esc)" aria-label="Close">${ic("x")}</button>
               </div>
             </div>
           </div>`;
         document.body.appendChild(wrap);
-        wrap.querySelectorAll(".ld-m-scroll > *").forEach((s, i) => s.style.setProperty("--i", Math.min(i, 8)));
-        wrap.addEventListener("pointerdown", (e) => {
-            if (e.target === wrap) closeInfo();
-        });
-        wrap.addEventListener("click", (e) => {
-            const b = e.target.closest("[data-do], .ld-ch-opt, [data-words], .ld-m-close, .ld-reveal");
-            if (!b) return;
-            if (b.classList.contains("ld-m-close")) return closeInfo();
-            if (b.classList.contains("ld-reveal")) return wrap.classList.remove("ld-blur");
-            if (b.classList.contains("ld-ch-opt")) {
-                useChoice(tab, it, Number(b.dataset.i));
-                return toast(Number(b.dataset.i) >= 0 ? `${it._title}: ${ch.options[Number(b.dataset.i)].split(",")[0]}` : `${it._title}: none of its choices`);
-            }
-            if (b.dataset.words) return addWords(tab, b.dataset.words, Number(b.dataset.line));
-            const what = b.dataset.do;
-            const now = () => Number(decks[tab].on.get(it.name)) || weightOf(it);
-            if (what === "copytag") copyText(`<lora:${it.alias}:${fmtW(decks[tab].on.has(it.name) ? now() : weightOf(it))}>`, "the tag");
-            else if (what === "copyact") copyText(it.activation, "the activation text");
-            else if (what === "copypath") copyText(it.path, "the path");
-            else if (what === "fav") toggleFav(it);
-            else if (what === "wminus" || what === "wplus") setWeight(tab, it, now() + (what === "wplus" ? 0.05 : -0.05) * (e.shiftKey ? 4 : 1));
-            else if (what === "edit") {
-                closeInfo();
-                if (typeof extraNetworksEditUserMetadata === "function") extraNetworksEditUserMetadata(forgeEvent(it.name), tab, "lora");
-            } else if (what === "meta") {
-                if (typeof extraNetworksRequestMetadata === "function") extraNetworksRequestMetadata(forgeEvent(it.name), "lora");
-            } else if (what === "toggle") {
-                if (decks[tab].on.has(it.name)) {
-                    removeLora(tab, it);
-                    toast(`Took out ${it._title}`);
-                } else if (ch) {
-                    useChoice(tab, it, 0);
-                    toast(`Added ${it._title}: ${ch.options[0].split(",")[0]} (pick another above)`);
-                } else {
-                    addLora(tab, it, it.activation.trim());
-                    toast(`Added ${it._title}`);
-                }
-                pop(b);
-            }
-        });
-        paintInfoState();
-        paintInfoFav();
+        const st = infoState = { tab, it, back, wrap, mode: "info", media: wrap.querySelector(".ld-m-media"), shape: prefs.shape, fr: null };
+        document.addEventListener("keydown", infoKeys, true);
+        renderMedia(st);
+        wrap.querySelector(".ld-m-body").appendChild(buildInfoPanel(st));
+        wireStage(st);
+        applySize(st);
+        wireResize(st);
+        // the faint rest of the picture follows the card when the window (and so the stage) changes size
+        if (window.ResizeObserver) new ResizeObserver(() => { if (st.mode === "frame") paintStage(st); }).observe(st.media);
+        wrap.addEventListener("click", (e) => onInfoClick(st, e));
         requestAnimationFrame(() => wrap.classList.add("show"));
         wrap.querySelector(".ld-m-close").focus();
     }
+    function onInfoClick(st, e) {
+        const b = e.target.closest("[data-do], .ld-ch-opt, [data-words], .ld-m-close, [data-shape], [data-pick]");
+        if (!b || b.disabled) return;
+        const { tab, wrap } = st;
+        const it = st.it;
+        const ch = it._choices;
+        if (b.classList.contains("ld-m-close")) return st.mode === "info" ? closeInfo() : setMode("info");
+        if (b.dataset.shape) {
+            st.shape = b.dataset.shape;
+            renderMedia(st);
+            return;
+        }
+        if (b.dataset.pick) {
+            const k = b.dataset.pick;
+            const g = k.startsWith("g:") && st.gens ? st.gens.items.find((x) => "g:" + x.id === k) : null;
+            if (k === "now") pickPicture(st, null);
+            else if (k === "up" && st.upload) pickPicture(st, st.upload);
+            else if (g) pickPicture(st, { kind: "gen", id: g.id, it: { ...it, preview: "gen", gen: g, pw: g.w, ph: g.h, framing: null, _src: "" } });
+            return;
+        }
+        if (b.classList.contains("ld-ch-opt")) {
+            useChoice(tab, it, Number(b.dataset.i));
+            return toast(Number(b.dataset.i) >= 0 ? `${it._title}: ${ch.options[Number(b.dataset.i)].split(",")[0]}` : `${it._title}: none of its choices`);
+        }
+        if (b.dataset.words) return addWords(tab, b.dataset.words);
+        const what = b.dataset.do;
+        const now = () => Number(decks[tab].on.get(it.name)) || weightOf(it);
+        if (what === "reveal") wrap.classList.remove("ld-blur");
+        else if (what === "back") setMode("info");
+        else if (what === "frame" || what === "card" || what === "meta") setMode(what);
+        else if (what === "copytag") copyText(`<lora:${it.alias}:${fmtW(decks[tab].on.has(it.name) ? now() : weightOf(it))}>`, "the tag");
+        else if (what === "copyact") copyText(it.activation, "the activation text");
+        else if (what === "copypath") copyText(it.path, "the path");
+        else if (what === "copymeta") copyText(JSON.stringify(st.meta || {}, null, 2), "the metadata");
+        else if (what === "rnd") {
+            const box = wrap.querySelector(".ld-ce-random textarea");
+            box.value = randomPrompt(trainedTags(st));
+            roll(box, true);
+        } else if (what === "rndcopy") copyText(wrap.querySelector(".ld-ce-random textarea").value, "the random prompt");
+        else if (what === "rndadd") {
+            const text = wrap.querySelector(".ld-ce-random textarea").value.trim();
+            if (text) {
+                addWords(tab, text);
+                toast("Random prompt added");
+            }
+        }
+        else if (what === "fav") toggleFav(it);
+        else if (what === "explore") api("reveal", { name: it.name }).then(() => toast(`Shown in ${REVEAL_IN}`), (err) => toast(`Couldn't open it: ${err.message}`));
+        else if (what === "wminus" || what === "wplus") setWeight(tab, it, now() + (what === "wplus" ? 0.05 : -0.05) * (e.shiftKey ? 4 : 1));
+        else if (what === "zin" || what === "zout") zoomAt(st, st.fr.z * (what === "zin" ? 1.15 : 1 / 1.15), 50, 50);
+        else if (what === "fill") {
+            st.fr = clampFraming(fit(st), { x: st.fr.x, y: st.fr.y, z: 1 });
+            paintStage(st);
+        } else if (what === "whole") {
+            st.fr = clampFraming(fit(st), { x: 0.5, y: 0.5, z: wholeZoom(fit(st)) });
+            paintStage(st);
+        } else if (what === "reset") {
+            st.fr = clampFraming(fit(st), { ...framingOf({ ...fit(st), framing: null }) });
+            st.fr.auto = true;
+            paintStage(st);
+        } else if (what === "upload") wrap.querySelector(".ld-file").click();
+        else if (what === "moregens") loadGens(st, st.gens ? st.gens.items.length : 0);
+        else if (what === "gallery") {
+            const src = galleryPic(tab);
+            if (src) pickFromUrl(st, src, "Gallery");
+        }
+        else if (what === "saveframe") {
+            // a picture picked here (or the first gen it shows) becomes its preview, with this framing; else just the framing
+            const fr = st.fr.auto ? null : { x: st.fr.x, y: st.fr.y, z: st.fr.z };
+            const pick = st.pick || (it.preview === "gen" ? { kind: "gen", id: it.gen.id } : null);
+            const hadOne = !!it.preview && it.preview !== "gen";
+            b.disabled = true;
+            const body = !pick ? Promise.resolve(null) : pick.kind === "data"
+                ? readData(pick.file).then((d) => ({ name: it.name, data: d, framing: fr })) : Promise.resolve({ name: it.name, gen: pick.id, framing: fr });
+            body.then((nb) => {
+                if (nb) toast("Saving the new preview…");
+                return nb ? api("preview", nb) : api("framing", { name: it.name, framing: fr });
+            }).then((saved) => {
+                takeItem(saved);
+                toast(pick ? `New preview saved${hadOne ? " (the old one is in LoRA Deck's backups)" : ""}` : fr ? "Preview framing saved" : "Back to the automatic framing");
+                setMode("info");
+            }, (err) => {
+                b.disabled = false;
+                toast(`Couldn't save it: ${err.message}`);
+            });
+        } else if (what === "savecard") {
+            const form = wrap.querySelector('[data-panel="card"] form');
+            const card = {};
+            for (const f of form.elements) if (f.name) card[f.name] = f.name === "preferred weight" ? Number(f.value || 0) : f.value;
+            b.disabled = true;
+            api("card", { name: it.name, card }).then((saved) => {
+                takeItem(saved);
+                toast("Card saved");
+                setMode("info");
+            }, (err) => {
+                b.disabled = false;
+                toast(`Couldn't save the card: ${err.message}`);
+            });
+        } else if (what === "toggle") {
+            if (decks[tab].on.has(it.name)) {
+                removeLora(tab, it);
+                toast(`Took out ${it._title}`);
+            } else if (ch) {
+                useChoice(tab, it, 0);
+                toast(`Added ${it._title}: ${ch.options[0].split(",")[0]} (pick another above)`);
+            } else {
+                addLora(tab, it, it.activation.trim());
+                toast(`Added ${it._title}`);
+            }
+            pop(b);
+        }
+    }
     function paintInfoState() {
-        const wrap = document.querySelector(".ld-modal-wrap");
-        if (!wrap || !infoState) return;
-        const { tab, it } = infoState;
+        const st = infoState;
+        if (!st) return;
+        const { tab, it, wrap } = st;
         const d = decks[tab];
         const on = d.on.has(it.name);
-        const main = wrap.querySelector('[data-do="toggle"]');
+        const main = wrap.querySelector('[data-panel="info"] [data-do="toggle"]');
+        if (!main) return;
         main.innerHTML = on ? `${ic("x")}<span>Take out</span>` : `${ic("plus")}<span>Add to prompt</span>`;
         main.classList.toggle("ld-primary", !on);
         main.classList.toggle("ld-danger", on);
         const w = wrap.querySelector(".ld-m-w");
-        w.hidden = !on;
-        if (on) w.querySelector("b").textContent = d.on.get(it.name);
+        if (w) {
+            w.hidden = !on;
+            if (on) w.querySelector("b").textContent = d.on.get(it.name);
+        }
         const box = promptBox(tab);
         const cur = on && box ? activeChoice(box.value, it) : null;
         wrap.querySelectorAll(".ld-m-choices .ld-ch-opt").forEach((b) => b.classList.toggle("on", cur != null && Number(b.dataset.i) === cur));
     }
     function paintInfoFav() {
-        const b = document.querySelector('.ld-modal-wrap [data-do="fav"]');
+        const b = document.querySelector('.ld-modal-wrap [data-panel="info"] [data-do="fav"]');
         if (!b || !infoState) return;
         const on = favs.has(infoState.it.name);
         b.classList.toggle("on", on);
