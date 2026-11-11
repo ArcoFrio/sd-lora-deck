@@ -31,7 +31,26 @@ To update it later: **Extensions > Installed > Check for updates**.
   Deck uses, but they haven't been tested live yet: please open an issue if something is off.
 - A recent browser (Chrome, Edge or Firefox from 2024 on).
 
-On Forge Neo, the folder that matches the **UI Preset** opens by itself.
+**The model each LoRA is for** shows on its card, as a small square label with a coloured dot (Illustrious, Pony,
+NoobAI, SDXL, SD 1.5, Anima, Flux, Qwen, Wan, Lumina...). It looks unlike the round folder badges, so the two can't be
+mixed up. LoRA Deck reads it from the first of these that says:
+1. its Civitai info (what its author picked);
+2. its card's "sd version", if you set one;
+3. its training metadata (the network module, the base model version, and the base checkpoint's name, which tells
+   Illustrious, NoobAI and Pony apart within SDXL);
+4. the names of its weights, for files with no metadata at all.
+
+The details show where it was read from.
+
+**On Forge Neo, the UI Preset picks what you see:**
+- If one top-level folder is named after the preset (`Anima` for anima, `SDXL`, `Illustrious`, `Pony` or `NoobAI` for
+  xl, `Flux`...), that folder opens.
+- If none or several are (folders sorted another way, or both `Illustrious` and `Pony` for xl), **Made for <preset>**
+  turns on instead. It shows only the LoRAs made for that preset, and the ones whose model can't be told, in every
+  folder. Click it to turn it off or on; the choice is kept per preset.
+- The last folder you opened for a preset is remembered too.
+- Forge Neo's own setting "Filter Lora based on selected Preset" uses the detected model as well when a card has no
+  "sd version".
 
 ## Using it
 
@@ -63,6 +82,15 @@ On Forge Neo, the folder that matches the **UI Preset** opens by itself.
   - rescan the LoRA folders;
   - **⋯**: activation text under the cards, Organize tags, Gens as previews, Animations, Classic Lora tab.
 - **★** marks favourites. **Favourites** and **Recent** (the last 40 added) filter the cards.
+- **Right-click a card** (or press the Menu key, or Shift+F10, on a focused card) for its menu:
+  - add it to the prompt or take it out;
+  - Details, Edit preview, Edit card, Metadata;
+  - favourite;
+  - copy its tag, its activation text or its path;
+  - Show in Explorer;
+  - **Delete…**: after you confirm, the LoRA file and the files that belong to it alone (its card, previews,
+    Civitai info, description) go to the Recycle Bin, where you can restore them. On macOS and Linux they go to
+    `cache/deleted` instead. Deleting works only from the computer the WebUI runs on.
 - **Animations** are short and never hold back a click. They can be turned off in **⋯**, and they also stop when your
   system asks for reduced motion.
 
@@ -176,13 +204,14 @@ are shared: `paper hat, red || blue || green` always adds `paper hat`, then the 
   - `/lora-deck/v1/card`, `/framing`, `/preview`: read and save a card, how its preview sits, a new preview.
   - `/lora-deck/v1/gens`, `/gen-thumb`, `/firsts`: the pictures made with a LoRA, a smaller copy of one, and the first
     one for each LoRA without a preview.
-  - `/lora-deck/v1/metadata`: its training metadata. `/lora-deck/v1/reveal`: Show in Explorer.
+  - `/lora-deck/v1/metadata`: its training metadata. `/lora-deck/v1/reveal`: Show in Explorer. `/lora-deck/v1/delete`:
+    a LoRA and its own files to the Recycle Bin.
 - `javascript/lora_deck.js`: the tab.
 - `javascript/lora_deck_tags.js`: which line a booru tag belongs on, for Organize tags.
 - `style.css`: its looks. The colours come from the WebUI's theme, so it follows light and dark mode.
 
-It writes only a LoRA's card (`<name>.json`) and its preview, and only when you save in the details. The output
-folders are only read.
+It writes only a LoRA's card (`<name>.json`) and its preview, when you save in the details, and deletes a LoRA only
+when you confirm it (to the Recycle Bin). The output folders are only read.
 
 ## License
 

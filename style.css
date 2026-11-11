@@ -62,8 +62,17 @@
     text-transform: none; letter-spacing: 0; }
 .ld-link:hover { text-decoration: underline; }
 .ld-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; font-size: 10px; font-weight: 800;
-    letter-spacing: .07em; text-transform: uppercase; color: #fff; background: rgba(8, 10, 18, .58); border: 1px solid rgba(255, 255, 255, .16);
-    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); white-space: nowrap; }
+    letter-spacing: .07em; text-transform: uppercase; color: #fff; background: rgba(8, 10, 18, .72); border: 1px solid rgba(255, 255, 255, .16);
+    white-space: nowrap; }
+/* a long folder name shortens (…) instead of squeezing the round buttons beside it */
+.ld-top .ld-badge { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 18px; box-sizing: border-box; }
+.ld-top .ld-mini { flex: none; }
+/* the model a LoRA is for: square corners and a coloured edge, unlike the round folder badge */
+.ld-model { --m: #9ca3af; display: inline-flex; align-items: center; gap: 4px; height: 16px; margin-right: 5px; padding: 0 5px 0 4px;
+    border-radius: 4px; vertical-align: 1px; font-size: 10.5px; font-weight: 750; letter-spacing: .01em; line-height: 1; white-space: nowrap;
+    color: color-mix(in srgb, var(--m) 45%, #fff); background: rgba(8, 10, 18, .6); border: 1px solid color-mix(in srgb, var(--m) 70%, transparent); }
+.ld-model::before { content: ""; width: 6px; height: 6px; border-radius: 2px; background: var(--m); }
+.ld-mode.ld-fit.on .ld-i { color: var(--ld-accent-text); }
 .ld-badge[hidden] { display: none; }
 @keyframes ld-spin { to { transform: rotate(360deg); } }
 @keyframes ld-shimmer { from { background-position: 150% 0; } to { background-position: -50% 0; } }
@@ -348,6 +357,33 @@
 .ld-menuitem small { display: block; margin-top: 1px; font-size: 12px; color: var(--ld-muted); }
 .ld-check { margin-left: auto; color: var(--ld-accent-text); opacity: 0; }
 .ld-menuitem[aria-checked="true"] .ld-check { opacity: 1; }
+/* the card's right-click menu */
+.ld-cardmenu { min-width: 230px; }
+.ld-menu-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px 8px; margin-bottom: 2px;
+    border-bottom: 1px solid var(--ld-line); }
+.ld-menu-head b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 750; color: var(--ld-text); }
+.ld-menu-head .ld-model { margin: 0; flex: none; }
+.ld-mi { padding: 7px 10px; gap: 10px; }
+.ld-mi b { font-size: 13px; font-weight: 600; }
+.ld-mi .ld-i { width: 16px; height: 16px; }
+.ld-mi.ld-danger, .ld-mi.ld-danger > .ld-i { color: #f87171; }
+.ld-mi.ld-danger:hover, .ld-mi.ld-danger:focus-visible { background: rgba(239, 68, 68, .14); }
+/* asking before a delete */
+.ld-confirm-wrap { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 24px; box-sizing: border-box;
+    background: rgba(4, 6, 12, .55); opacity: 0; transition: opacity .15s; }
+.ld-confirm-wrap.show { opacity: 1; }
+.ld-confirm { width: min(440px, 100%); padding: 22px 22px 18px; border-radius: 18px; text-align: center; color: var(--ld-text);
+    background: var(--ld-panel); border: 1px solid var(--ld-line-2); box-shadow: 0 30px 80px -30px rgba(0, 0, 0, .85);
+    transform: translateY(8px) scale(.97); transition: transform .2s var(--ld-ease); }
+.ld-confirm-wrap.show .ld-confirm { transform: none; }
+.ld-confirm-icon { display: inline-grid; place-items: center; width: 46px; height: 46px; margin-bottom: 10px; border-radius: 50%;
+    color: #f87171; background: rgba(239, 68, 68, .14); }
+.ld-confirm h3 { margin: 0 0 8px; padding: 0; border: 0; font-size: 18px; font-weight: 800; color: var(--ld-text); }
+.ld-confirm p { margin: 0 0 18px; font-size: 13.5px; line-height: 1.55; color: var(--ld-muted); }
+.ld-confirm code { font: 12.5px var(--ld-mono); color: var(--ld-text); overflow-wrap: anywhere; }
+.ld-confirm-btns { display: flex; justify-content: center; gap: 8px; }
+.ld-pill.ld-danger-solid { color: #fff; background: #dc2626; border-color: transparent; }
+.ld-pill.ld-danger-solid:hover { background: #ef4444; }
 .ld-check .ld-i { stroke-width: 2.6; }
 .ld-sep { height: 1px; margin: 4px 6px; background: var(--ld-line); }
 .ld-chooser { width: 350px; padding: 8px; }

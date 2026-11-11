@@ -21,8 +21,11 @@ The page itself is javascript/lora_deck.js and style.css; this file gives it wha
   GET /lora-deck/v1/firsts           for each LoRA without a preview, the first picture made with it
   GET /lora-deck/v1/metadata?name=   what its .safetensors says about its training
   POST /lora-deck/v1/reveal          show the file in Explorer (Finder, the file manager); only from this computer
+  POST /lora-deck/v1/delete          move a LoRA and its own files (card, previews, Civitai info) to the Recycle Bin;
+                                     only from this computer
 
-It writes only the LoRA's card (.json) and preview, and only when asked from the page. The output folders are only read.
+It writes only the LoRA's card (.json) and preview, and deletes a LoRA only when asked from the page (to the Recycle
+Bin). The output folders are only read.
 """
 import base64
 import hashlib
@@ -349,6 +352,7 @@ def _item(obj):
         "notes": _plain(user.get("notes") or "", 4000),
         "description": _plain(user.get("description") or _text_file(base)),
         "sd_version": str(user.get("sd version") or ""),
+        "model": _model(obj, meta, civ, user),
         "base_model": str(civ.get("baseModel") or ""),
         "trained_words": [str(w).strip() for w in civ.get("trainedWords") or [] if str(w).strip()][:30],
         "tags": _tag_counts(meta),
@@ -537,6 +541,141 @@ def _set_framing(card, fr):
         card[OWN_KEY] = own
     else:
         card.pop(OWN_KEY, None)
+
+
+# --- which model a LoRA was made for -------------------------------------------------------------------------
+# The first of these that says: its Civitai info (what its author picked), its card's "sd version" (set by hand),
+# its training metadata (the network module, the base model version and the base checkpoint's file name), and last
+# the names of its weights (only the file's header is read). "arch" is the Forge Neo preset it works with.
+FAMILY_ARCH = {"SD 1.5": "sd", "SD 2": "sd", "SDXL": "xl", "Pony": "xl", "Illustrious": "xl", "NoobAI": "xl", "Flux": "flux",
+               "Flux.2": "klein", "Chroma": "flux", "Qwen": "qwen", "Wan": "wan", "Anima": "anima", "Lumina": "lumina",
+               "Z-Image": "zit", "SD 3": "", "HiDream": "", "Hunyuan": "", "LTX Video": ""}
+ARCH_FAMILY = {"sd": "SD 1.5", "xl": "SDXL", "flux": "Flux", "klein": "Flux.2", "qwen": "Qwen", "qwen21": "Qwen", "qwenedit": "Qwen",
+               "wan": "Wan", "anima": "Anima", "lumina": "Lumina", "zit": "Z-Image", "ernie": "Ernie", "pid": "PiD", "krea": "Krea"}
+
+
+def _family_from_text(t):
+    """A family from a base model's name (Civitai's baseModel, a checkpoint file name, a metadata field)."""
+    t = str(t or "").lower().replace("_", " ").replace("-", " ")
+    if not t.strip():
+        return None
+    # "ixl" / "pdxl": the endings Illustrious and Pony merges and LoRAs often carry ("richyrichmixixl", "..._pdxl")
+    rules = (("pony", "Pony"), ("pdxl", "Pony"), ("illustrious", "Illustrious"), ("noob", "NoobAI"), ("ilxl", "Illustrious"),
+             ("ixl", "Illustrious"), ("illu", "Illustrious"), ("animagine", "SDXL"), ("anima", "Anima"), ("flux.2", "Flux.2"), ("flux 2", "Flux.2"), ("chroma", "Chroma"),
+             ("flux", "Flux"), ("qwen", "Qwen"), ("wan", "Wan"), ("z image", "Z-Image"), ("zimage", "Z-Image"),
+             ("lumina", "Lumina"), ("hidream", "HiDream"), ("hunyuan", "Hunyuan"), ("ltx", "LTX Video"),
+             ("sd 3", "SD 3"), ("sd3", "SD 3"), ("sdxl", "SDXL"), ("xl", "SDXL"), ("sd 2", "SD 2"), ("sd v2", "SD 2"),
+             ("sd 1", "SD 1.5"), ("sd v1", "SD 1.5"), ("stable diffusion v1", "SD 1.5"), ("v1 5", "SD 1.5"))
+    for word, fam in rules:
+        if word in t:
+            return fam
+    return None
+
+
+def _family_from_keys(path):
+    """From the weights' names in the file's header, for a LoRA that says nothing else."""
+    try:
+        with open(path, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            if n > 64 * 1024 * 1024:
+                return None
+            keys = [k for k in json.loads(f.read(n)) if k != "__metadata__"]
+    except Exception:
+        return None
+    k = " ".join(keys)
+    if "double_blocks" in k or "single_blocks" in k or "single_transformer_blocks" in k:
+        return "Flux"
+    if "joint_blocks" in k:
+        return "SD 3"
+    if "img_mlp" in k or "txt_mlp" in k or ("transformer_blocks" in k and "add_k_proj" in k):
+        return "Qwen"
+    if ".cross_attn." in k and (".ffn." in k or "self_attn.q." in k):
+        return "Wan"
+    if "lora_unet_blocks_" in k or ("blocks." in k and "self_attn.q_proj" in k and "mlp.layer1" in k):
+        return "Anima"
+    if "noise_refiner" in k or "context_refiner" in k or ".attention.qkv" in k:
+        return "Lumina"  # Lumina 2 and Z-Image look alike here
+    if "lora_te2" in k or "text_encoder_2" in k or re.search(r"transformer_blocks[._][1-9]", k):
+        return "SDXL"
+    if "lora_unet" in k or "lora_te" in k or "down_blocks" in k or "input_blocks" in k:
+        return "SD 1.5"
+    return None
+
+
+_MODEL = {}
+
+
+def _model(obj, meta, civ, user):
+    """{"name": a family to show ("Illustrious"), "arch": the preset it fits ("xl") or "", "from": where it was read}."""
+    key = (obj.filename, _stamp(obj.filename), str(civ.get("baseModel")), str(user.get("sd version")))
+    if key in _MODEL:
+        return _MODEL[key]
+    out = None
+    fam = _family_from_text(civ.get("baseModel"))
+    if fam:
+        out = {"name": fam, "from": "civitai"}
+    card = str(user.get("sd version") or "")
+    if card and card.lower() not in ("unknown", "none") and card in ARCH_FAMILY:
+        if not out or FAMILY_ARCH.get(out["name"]) != card:
+            out = {"name": ARCH_FAMILY[card], "from": "card", "arch": card}
+    if not out:
+        module = str(meta.get("ss_network_module") or "")
+        guess = (_family_from_text(module.replace("networks.lora_", "")) if "networks.lora_" in module else None) \
+            or _family_from_text(meta.get("ss_base_model_version")) or _family_from_text(meta.get("modelspec.architecture"))
+        if guess:
+            # SDXL's families share one architecture: the base checkpoint's name, else the LoRA's own, tells them apart
+            fine = (_family_from_text(meta.get("ss_sd_model_name")) or _family_from_text(obj.name)) if guess == "SDXL" else None
+            tags = str(meta.get("ss_tag_frequency") or "")
+            if guess == "SDXL" and not fine and ("score_9" in tags or "score_8_up" in tags):
+                fine = "Pony"
+            out = {"name": fine if fine and FAMILY_ARCH.get(fine) == "xl" else guess, "from": "metadata"}
+    if not out:
+        fam = _family_from_keys(obj.filename)
+        if fam:
+            out = {"name": fam, "from": "weights"}
+    if out and out["name"] == "Qwen" and "edit" in obj.name.lower():
+        out["name"] = "Qwen Edit"
+    if out:
+        out.setdefault("arch", FAMILY_ARCH.get(out["name"].replace(" Edit", ""), ""))
+    _MODEL[key] = out
+    return out
+
+
+# --- deleting a LoRA ------------------------------------------------------------------------------------------
+def _own_files(obj):
+    """The LoRA file and the files that belong to it alone (its card, previews, Civitai info, description). Named
+    one by one, so another LoRA called "<name>.v2" is never caught."""
+    base = os.path.splitext(obj.filename)[0]
+    names = [obj.filename, base + ".json", base + ".civitai.info", base + ".txt", base + ".description.txt"]
+    for ext in STILL + MOVING:
+        names += [f"{base}.{ext}", f"{base}.preview.{ext}"]
+    return [n for n in dict.fromkeys(names) if os.path.isfile(n)]
+
+
+def _to_trash(paths):
+    """To the Recycle Bin on Windows (undo there); elsewhere into cache/deleted/<date>/ (restore by moving back)."""
+    if sys.platform.startswith("win"):
+        import ctypes
+        from ctypes import wintypes
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
+                        ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_uint16), ("fAnyOperationsAborted", wintypes.BOOL),
+                        ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+        FO_DELETE, FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO, FOF_NOERRORUI = 3, 0x4, 0x10, 0x40, 0x400
+        # the paths, each ended by a NUL, the list by one more (the buffer adds the last)
+        buf = ctypes.create_unicode_buffer("\0".join(os.path.abspath(x) for x in paths) + "\0")
+        op = SHFILEOPSTRUCTW(None, FO_DELETE, ctypes.cast(buf, wintypes.LPCWSTR), None,
+                             FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI, False, None, None)
+        rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+        if rc or op.fAnyOperationsAborted or any(os.path.exists(x) for x in paths):
+            raise OSError(f"the Recycle Bin refused it (code {rc})")
+        return "the Recycle Bin"
+    dest = os.path.join(EXT_DIR, "cache", "deleted", time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(dest, exist_ok=True)
+    for x in paths:
+        shutil.move(x, os.path.join(dest, os.path.basename(x)))
+    return dest
 
 
 def _find(name):
@@ -728,6 +867,20 @@ def deck_api(_, app: FastAPI):
                     pass
             meta[k] = v
         return {"metadata": meta, "file": os.path.basename(obj.filename)}
+
+    @app.post("/lora-deck/v1/delete")
+    def deck_delete(req: NameIn, request: Request):
+        if not _local(request):
+            raise HTTPException(403, "Only from the computer the WebUI runs on.")
+        obj = _find(req.name)
+        files = _own_files(obj)
+        try:
+            where = _to_trash(files)
+        except OSError as e:
+            raise HTTPException(500, f"Could not delete it: {e}")
+        print(f"[LoRA Deck] deleted {obj.name} ({len(files)} files) to {where}")
+        _networks(refresh=True)
+        return {"ok": True, "files": [os.path.basename(x) for x in files], "where": where}
 
     @app.post("/lora-deck/v1/reveal")
     def deck_reveal(req: NameIn, request: Request):

@@ -99,6 +99,8 @@
         hex: '<path d="M12 2.8l7.2 4.3v9.8L12 21.2l-7.2-4.3V7.1z"/>',
         octa: '<path d="M8.6 2.8h6.8L19 6.4v11.2l-3.6 3.6H8.6L5 17.6V6.4z"/>',
         rect: '<rect x="5" y="3.5" width="14" height="17" rx="3"/>',
+        cube: '<path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/>',
+        trash: '<path d="M4.5 7h15M10 7V4.8h4V7M6.5 7l.9 12.2c.1.9.8 1.6 1.7 1.6h5.8c.9 0 1.6-.7 1.7-1.6L17.5 7"/><path d="M10 11v6M14 11v6"/>',
         move: '<path d="M12 3.5v17M3.5 12h17M12 3.5 9.5 6M12 3.5 14.5 6M12 20.5 9.5 18M12 20.5l2.5-2.5M3.5 12 6 9.5M3.5 12 6 14.5M20.5 12 18 9.5M20.5 12 18 14.5"/>',
     };
     const ic = (name, cls) => `<svg class="ld-i${cls ? " " + cls : ""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
@@ -701,11 +703,39 @@
         const words = (PRESET_WORDS[preset] || [preset]).map(compact);
         return sortedKids(tree).filter((f) => f !== OTHER && words.some((w) => w && (compact(f) === w || compact(f).startsWith(w))));
     }
-    function hiddenByPreset(it) {
-        if (!data.meta.preset_filter) return false;
+    // the preset a LoRA is for: its card's "sd version" when set, else the model LoRA Deck read from the file
+    const PRESET_LABEL = { sd: "SD 1.5", xl: "SDXL", flux: "Flux", klein: "Flux.2", qwen: "Qwen", qwen21: "Qwen 2.1", qwenedit: "Qwen Edit",
+        lumina: "Lumina", zit: "Z-Image", wan: "Wan", anima: "Anima", ernie: "Ernie", pid: "PiD", krea: "Krea" };
+    const QWEN = ["qwen", "qwen21", "qwenedit"];
+    function archOf(it) {
         const v = compact(it.sd_version);
-        return !!v && v !== "unknown" && v !== compact(currentPreset());
+        if (v && v !== "unknown") return v;
+        return (it.model && it.model.arch) || "";
     }
+    // unknown fits everything (it can't be told); the Qwen presets share their LoRAs
+    function fitsPreset(it, preset) {
+        const a = archOf(it), p = compact(preset);
+        if (!a || !p) return true;
+        return a === p || (QWEN.includes(a) && QWEN.includes(p));
+    }
+    function hiddenByPreset(it) {
+        return !!data.meta.preset_filter && !fitsPreset(it, currentPreset());
+    }
+    // "Made for <preset>": on by itself when the folders don't say (no folder, or several, match the preset), so a
+    // collection not sorted by model still shows what fits; a click on it is remembered for that preset
+    function fitFor(d) {
+        const preset = currentPreset();
+        if (d.fitPreset === preset) return;
+        d.fitPreset = preset;
+        const saved = store.get(`fit.${preset}`, null);
+        d.fit = typeof saved === "boolean" ? saved
+            : !!PRESET_LABEL[preset] && familiesFor(preset).length !== 1 && data.items.some((it) => it.model && it.model.arch);
+    }
+    const MODEL_HUE = { "Anima": "#2dd4bf", "Illustrious": "#a78bfa", "Pony": "#f472b6", "NoobAI": "#fb923c", "SDXL": "#60a5fa",
+        "SD 1.5": "#94a3b8", "SD 2": "#94a3b8", "Flux": "#fbbf24", "Flux.2": "#facc15", "Chroma": "#a3e635", "Qwen": "#c084fc",
+        "Qwen Edit": "#c084fc", "Wan": "#4ade80", "Lumina": "#22d3ee", "Z-Image": "#22d3ee", "SD 3": "#818cf8" };
+    const modelChip = (it) => (it.model ? `<span class="ld-model" style="--m:${MODEL_HUE[it.model.name] || "#9ca3af"}">${esc(it.model.name)}</span>` : "");
+    const MODEL_FROM = { civitai: "its Civitai info", card: "its card", metadata: "its training metadata", weights: "its weights" };
     function startPath(d) {
         const preset = currentPreset();
         const saved = store.get(`path.${d.tab}.${preset}`, null);
@@ -1154,10 +1184,22 @@
             } else if (e.key === "i") openInfo(d.tab, it);
             else if (e.key === "f") toggleFav(it);
             else if (e.key === "Delete" && d.on.has(it.name)) removeLora(d.tab, it);
+            else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+                e.preventDefault();
+                const r = card.getBoundingClientRect();
+                openCardMenu(d, it, card, r.left + r.width / 2, r.top + r.height / 3);
+            }
             else if (["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"].includes(e.key)) {
                 e.preventDefault();
                 moveFocus(d, card, e.key);
             }
+        });
+        d.grid.addEventListener("contextmenu", (e) => {
+            const card = e.target.closest(".ld-card[data-name]");
+            const it = card && data.by.get(card.dataset.name);
+            if (!it) return;
+            e.preventDefault();
+            openCardMenu(d, it, card, e.clientX, e.clientY);
         });
         d.grid.addEventListener("wheel", (e) => {
             if (!e.ctrlKey) return;
@@ -1275,7 +1317,9 @@
             return it.folder === p || it.folder.startsWith(p + "/");
         };
         const recentSet = new Set(recent);
-        const base = data.items.filter((it) => !hiddenByPreset(it)
+        fitFor(d);
+        const preset = currentPreset();
+        const base = data.items.filter((it) => !hiddenByPreset(it) && (!d.fit || fitsPreset(it, preset))
             && (d.mode !== "fav" || favs.has(it.name))
             && (d.mode !== "recent" || recentSet.has(it.name))
             && (d.mode !== "on" || d.on.has(it.name)));
@@ -1354,6 +1398,7 @@
         }
     }
     function renderNav(d) {
+        fitFor(d);
         const path = d.path || [];
         const preset = currentPreset();
         const fits = new Set(familiesFor(preset));
@@ -1390,12 +1435,19 @@
         const count = (fn) => data.items.filter((it) => !hiddenByPreset(it) && fn(it)).length;
         const mode = (m, icon, label, n) => `<button type="button" class="ld-mode${d.mode === m ? " on" : ""}" data-m="${m}" aria-pressed="${d.mode === m}">${ic(icon)}<span>${label}</span>${n != null ? `<small>${n}</small>` : ""}</button>`;
         const recentSet = new Set(recent);
-        d.modes.innerHTML = mode("on", "checkCircle", "In prompt", d.on.size) + mode("fav", "star", "Favourites", count((it) => favs.has(it.name)))
+        const pre = currentPreset();
+        const fit = PRESET_LABEL[pre] && data.items.some((it) => it.model && it.model.arch)
+            ? `<button type="button" class="ld-mode ld-fit${d.fit ? " on" : ""}" data-fit="1" aria-pressed="${!!d.fit}" title="${d.fit ? `Showing the LoRAs made for ${PRESET_LABEL[pre]} (and the ones it can't tell). Click to show every model's.` : `Show only the LoRAs made for ${PRESET_LABEL[pre]}`}">${ic("cube")}<span>Made for ${esc(PRESET_LABEL[pre])}</span><small>${count((it) => fitsPreset(it, pre))}</small></button>`
+            : "";
+        d.modes.innerHTML = fit + mode("on", "checkCircle", "In prompt", d.on.size) + mode("fav", "star", "Favourites", count((it) => favs.has(it.name)))
             + mode("recent", "clock", "Recent", count((it) => recentSet.has(it.name)));
         d.modes.onclick = (e) => {
             const b = e.target.closest(".ld-mode");
             if (!b) return;
-            d.mode = d.mode === b.dataset.m ? "all" : b.dataset.m;
+            if (b.dataset.fit) {
+                d.fit = !d.fit;
+                store.set(`fit.${currentPreset()}`, d.fit);
+            } else d.mode = d.mode === b.dataset.m ? "all" : b.dataset.m;
             renderAll(d);
         };
     }
@@ -1473,7 +1525,7 @@
             <div class="ld-onmark" aria-hidden="true">${ic("check")}<span class="ld-w"></span></div>
             <div class="ld-cap">
               <div class="ld-title">${esc(it._title)}</div>
-              ${sub ? `<div class="ld-subt">${esc(sub)}</div>` : ""}
+              ${sub || it.model ? `<div class="ld-subt">${modelChip(it)}${esc(sub)}</div>` : ""}
             </div>
             <div class="ld-weight">
               <button type="button" class="ld-btn ld-mini" data-act="minus" title="Weight −0.05 (Shift: −0.2)" aria-label="Lower the weight">${ic("minus")}</button>
@@ -1483,7 +1535,7 @@
             </div>
           </div>
           <div class="ld-act" title="${esc(it.activation)}">${it.activation ? esc(it.activation.replace(/\s*\n\s*/g, " ").replace(/\s*\|\|\s*/g, "  |  ")) : '<i>no activation text</i>'}</div>`;
-        c.title = `${it.file}${it.folder ? `\n${it.folder}` : ""}\n${it._choices ? "Click to pick one of its choices" : "Click to add it to the prompt"}`;
+        c.title = `${it.file}${it.folder ? `\n${it.folder}` : ""}${it.model ? `\nMade for ${it.model.name} (from ${MODEL_FROM[it.model.from] || it.model.from})` : ""}\n${it._choices ? "Click to pick one of its choices" : "Click to add it to the prompt"} · right-click for more`;
         c.classList.toggle("fav", favs.has(it.name));
         const pic = c.querySelector("img.ld-pic");
         if (pic) {
@@ -1660,7 +1712,7 @@
             }
         }
         node.style.left = left + "px";
-        node.style.top = top + "px";
+        node.style.top = clamp(top, 8, Math.max(8, window.innerHeight - h - 8)) + "px";  // never outside the window
         requestAnimationFrame(() => node.classList.add("show"));
         const away = (e) => {
             if (!node.isConnected) return document.removeEventListener("pointerdown", away, true);
@@ -1670,6 +1722,122 @@
             }
         };
         setTimeout(() => document.addEventListener("pointerdown", away, true));
+    }
+    // right-click on a card: what the details have, one click away
+    function openCardMenu(d, it, card, x, y) {
+        closeFloating();
+        const on = d.on.has(it.name);
+        const m = el("div", "ld-menu ld-floating ld-cardmenu");
+        m.setAttribute("role", "menu");
+        const item = (key, icon, label, extra) => `<button type="button" role="menuitem" class="ld-menuitem ld-mi${extra || ""}" data-k="${key}">${ic(icon)}<span><b>${label}</b></span></button>`;
+        m.innerHTML = `<div class="ld-menu-head"><b>${esc(it._title)}</b>${modelChip(it)}</div>
+          ${on ? item("toggle", "x", "Take it out of the prompt") : item("toggle", "plus", it._choices ? "Add to the prompt…" : "Add to the prompt")}
+          ${item("info", "info", "Details")}
+          ${item("frame", "image", "Edit preview")}
+          ${item("card", "edit", "Edit card")}
+          ${item("meta", "code", "Metadata")}
+          <div class="ld-sep"></div>
+          ${item("fav", "star", favs.has(it.name) ? "Remove from favourites" : "Add to favourites")}
+          ${item("copytag", "copy", "Copy its tag")}
+          ${it.activation ? item("copyact", "lines", "Copy its activation text") : ""}
+          ${item("copypath", "copy", "Copy the file's path")}
+          ${item("explore", "folder", `Show in ${REVEAL_IN}`)}
+          <div class="ld-sep"></div>
+          ${item("delete", "trash", "Delete…", " ld-danger")}`;
+        m.querySelectorAll(".ld-menuitem").forEach((b, i) => b.style.setProperty("--i", i));
+        m.addEventListener("click", (e) => {
+            const b = e.target.closest(".ld-menuitem");
+            if (!b) return;
+            const k = b.dataset.k;
+            closeFloating();
+            if (k === "toggle") {
+                if (on) removeLora(d.tab, it);
+                else primary(d, it, card.isConnected ? card : d.cards.get(it.name));
+            } else if (k === "info") openInfo(d.tab, it);
+            else if (k === "frame" || k === "card" || k === "meta") {
+                openInfo(d.tab, it);
+                setMode(k);
+            } else if (k === "fav") toggleFav(it);
+            else if (k === "copytag") copyText(`<lora:${it.alias}:${fmtW(on ? d.on.get(it.name) : weightOf(it))}>`, "the tag");
+            else if (k === "copyact") copyText(it.activation, "the activation text");
+            else if (k === "copypath") copyText(it.path, "the path");
+            else if (k === "explore") api("reveal", { name: it.name }).then(() => toast(`Shown in ${REVEAL_IN}`), (err) => toast(`Couldn't open it: ${err.message}`));
+            else if (k === "delete") confirmDelete(it);
+        });
+        m.addEventListener("keydown", (e) => {
+            const items = [...m.querySelectorAll(".ld-menuitem")];
+            const i = items.indexOf(document.activeElement);
+            if (e.key === "Escape") {
+                closeFloating();
+                card.focus?.();
+            } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
+            }
+        });
+        // at the pointer, kept inside the window
+        const at = { getBoundingClientRect: () => ({ left: x, right: x, top: y, bottom: y, width: 0, height: 0 }), contains: () => false };
+        placeFloating(m, at, "start");
+        const first = m.querySelector(".ld-menuitem");
+        if (first) first.focus({ preventScroll: true });
+    }
+    // deleting: asked first; the files go to the Recycle Bin (LoRA Deck's own folder elsewhere), so it can be undone there
+    function confirmDelete(it) {
+        document.querySelectorAll(".ld-confirm-wrap").forEach((w) => w.remove());
+        const wrap = el("div", "ld-confirm-wrap");
+        wrap.innerHTML = `<div class="ld-confirm" role="alertdialog" aria-modal="true" aria-labelledby="ld-confirm-t">
+            <div class="ld-confirm-icon">${ic("trash")}</div>
+            <h3 id="ld-confirm-t">Delete “${esc(it._title)}”?</h3>
+            <p>Its file <code>${esc(it.file)}</code> and the files that belong to it (card, previews, Civitai info) go to the
+            Recycle Bin, where you can restore them.</p>
+            <div class="ld-confirm-btns"><button type="button" class="ld-btn ld-pill" data-do="no">Cancel</button>
+              <button type="button" class="ld-btn ld-pill ld-danger-solid" data-do="yes">${ic("trash")}<span>Delete</span></button></div></div>`;
+        document.body.appendChild(wrap);
+        requestAnimationFrame(() => wrap.classList.add("show"));
+        const close = () => {
+            wrap.remove();
+            document.removeEventListener("keydown", keys, true);
+        };
+        const keys = (e) => {
+            if (e.key === "Escape") {
+                e.stopPropagation();
+                close();
+            }
+        };
+        document.addEventListener("keydown", keys, true);
+        wrap.addEventListener("pointerdown", (e) => { if (e.target === wrap) close(); });
+        wrap.addEventListener("click", (e) => {
+            const b = e.target.closest("[data-do]");
+            if (!b) return;
+            if (b.dataset.do === "no") return close();
+            b.disabled = true;
+            api("delete", { name: it.name }).then((r) => {
+                close();
+                forget(it);
+                toast(`Deleted ${it._title} (${r.files.length} file${r.files.length === 1 ? "" : "s"}, in ${r.where})`);
+            }, (err) => {
+                b.disabled = false;
+                toast(`Couldn't delete it: ${err.message}`);
+            });
+        });
+        wrap.querySelector('[data-do="no"]').focus();
+    }
+    // a deleted LoRA leaves the deck (its tag stays in the prompt, shown as not found there)
+    function forget(it) {
+        if (infoState && infoState.it.name === it.name) closeInfo();
+        data.items = data.items.filter((x) => x.name !== it.name);
+        data.by.delete(it.name);
+        if (data.byAlias) data.byAlias.delete(it.alias);
+        favs.delete(it.name);
+        store.set("favs", [...favs]);
+        buildTree();
+        everyDeck((d) => {
+            const c = d.cards.get(it.name);
+            d.cards.delete(it.name);
+            if (c && c.isConnected && motionOn()) {
+                c.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(.9)" }], { duration: 180, easing: EASE }).onfinish = () => renderAll(d);
+            } else renderAll(d);
+        });
     }
     function openChooser(d, it, card) {
         closeFloating();
@@ -2527,7 +2695,9 @@
         panel.dataset.panel = "info";
         const chips = (list, cls) => list.map(([t, n]) => `<button type="button" class="ld-chip ${cls || ""}" data-words="${esc(t)}" title="Add “${esc(t)}” to the prompt">${esc(t)}${n ? `<small>${n}</small>` : ""}</button>`).join("");
         const facts = [
-            ["File", it.file], ["Folder", it.folder || "models/Lora"], ["Base model", it.base_model], ["SD version", it.sd_version && it.sd_version !== "Unknown" ? it.sd_version : ""],
+            ["File", it.file], ["Folder", it.folder || "models/Lora"],
+            ["Made for", it.model ? `${it.model.name}${PRESET_LABEL[it.model.arch] && PRESET_LABEL[it.model.arch] !== it.model.name ? ` (the ${PRESET_LABEL[it.model.arch]} preset)` : ""}, read from ${MODEL_FROM[it.model.from] || it.model.from}` : ""],
+            ["Base model", it.base_model], ["SD version", it.sd_version && it.sd_version !== "Unknown" ? it.sd_version : ""],
             ["Preview", it.preview === "gen" ? `its first gen, ${it.gen.file} (${new Date(it.gen.t * 1000).toLocaleDateString()}), shown until it has a preview of its own`
                 : it.pw ? `${it.pw} × ${it.ph}${it.framing ? " · framed by hand" : ""}` : ""],
             ["Modified", it.mtime ? new Date(it.mtime * 1000).toLocaleString() : ""], ["Size", it.size ? (it.size / 1048576).toFixed(1) + " MB" : ""], ["Hash", it.hash],
